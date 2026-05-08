@@ -226,11 +226,18 @@ class FlexDriver(AnalyzerDriver):
 
         Returns ``True`` when the data is ready, ``False`` if the abort flag
         was set before the buffer filled.
+
+        ``abort()`` issues a GPIB Device Clear which can cause an in-flight
+        ``NUB?`` query to fail with ``VisaIOError``. When that happens *and*
+        the abort flag is set, swallow the error and exit cleanly — the
+        engine reports ``aborted=True`` instead of ``failed``.
         """
         while not self._abort_event.is_set():
             try:
                 nub = int(instr.query("NUB?").strip())
             except pyvisa.errors.VisaIOError as exc:
+                if self._abort_event.is_set():
+                    return False
                 raise CommunicationError("NUB? poll failed") from exc
             if nub >= expected:
                 return True

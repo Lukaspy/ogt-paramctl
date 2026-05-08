@@ -119,3 +119,4 @@ addopts = [
 markers = [
     "hardware: requires a real instrument and GPIB adapter (skipped by default in CI)",
 ]
+qt_api = "pyqt6"

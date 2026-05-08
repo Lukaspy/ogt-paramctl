@@ -59,6 +59,7 @@ def run_sweep(
     yield SweepStarted(setup=setup)
 
     sample_count = 0
+    aborted_in_loop = False
     measure_iter = driver.measure(setup)
 
     try:
@@ -69,8 +70,8 @@ def run_sweep(
                 logger.info("run_sweep: abort requested after %d samples", sample_count)
                 driver.abort()
                 _close_iterator(measure_iter)
-                yield SweepCompleted(aborted=True, sample_count=sample_count)
-                return
+                aborted_in_loop = True
+                break
     except (KeyboardInterrupt, SystemExit):
         _close_iterator(measure_iter)
         raise
@@ -80,7 +81,13 @@ def run_sweep(
         yield SweepFailed(exception=exc, sample_count=sample_count)
         return
 
-    yield SweepCompleted(aborted=False, sample_count=sample_count)
+    # Iterator exhausted. The run was aborted iff either:
+    #   (a) we broke out of the loop on the abort flag, or
+    #   (b) the driver itself self-terminated because abort was set
+    #       (e.g. FlexDriver._wait_for_data returns early when its abort
+    #       flag is observed, leaving the iterator with no more samples).
+    aborted = aborted_in_loop or abort.is_set()
+    yield SweepCompleted(aborted=aborted, sample_count=sample_count)
 
 
 def _close_iterator(it: Iterator[object]) -> None:

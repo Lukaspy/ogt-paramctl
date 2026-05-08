@@ -1,6 +1,12 @@
 """Pytest configuration shared by unit, integration, and hardware tests."""
 from __future__ import annotations
 
+import os
+
+# Run Qt tests headless. Set this before any Qt module is imported so widgets
+# can be instantiated in CI / SSH sessions without a display server.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 
 
