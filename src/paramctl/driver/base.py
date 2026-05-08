@@ -9,8 +9,13 @@ against the abstract type only.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from types import TracebackType
-from typing import Self
+from typing import TYPE_CHECKING, Self
+
+if TYPE_CHECKING:
+    from ..models.results import Sample
+    from ..models.setup import Setup
 
 
 class DriverError(Exception):
@@ -84,6 +89,40 @@ class AnalyzerDriver(ABC):
     @abstractmethod
     def is_connected(self) -> bool:
         """True if ``connect()`` has been called and ``disconnect()`` has not."""
+
+    @abstractmethod
+    def measure(self, setup: Setup) -> Iterator[Sample]:
+        """Run the measurement described by ``setup`` and yield samples in order.
+
+        The driver is responsible for the full lifecycle: applying the setup
+        to the instrument, starting the run, polling for samples, and
+        cleaning up on completion or interruption. The caller iterates the
+        returned ``Iterator`` and stops by either exhausting it or calling
+        ``close()`` on it (the engine does the latter on user-initiated abort).
+
+        Args:
+            setup: Validated, frozen setup describing the channels and
+                measurement mode. The driver must not mutate it.
+
+        Yields:
+            One ``Sample`` per measurement point, in acquisition order.
+
+        Raises:
+            NotConnectedError: If ``connect()`` has not been called.
+            CommunicationError: If the underlying transport reports a failure.
+            NotImplementedError: If the setup uses a measurement mode this
+                concrete driver does not yet support.
+        """
+
+    @abstractmethod
+    def abort(self) -> None:
+        """Request cancellation of any in-progress measurement.
+
+        Must be safe to call from a thread other than the one driving
+        ``measure()``. The active iterator stops yielding new samples
+        promptly; CLAUDE.md §189 requires user-visible abort latency under
+        ~1 second.
+        """
 
     def __enter__(self) -> Self:
         self.connect()

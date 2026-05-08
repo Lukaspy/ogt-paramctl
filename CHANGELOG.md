@@ -32,3 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Setup` — top-level model: schema_version (pinned to 1), channels list, measurement, optional safety_ceilings dict, optional last-used resource_string. Cross-channel validation: unique channel_id, exactly-one VAR1/VAR2/VAR1' pairing with the measurement, ceiling enforcement on source values and compliance.
   - `Sample` and `MeasurementResult` shells for the engine layer to populate later.
 - 52 model tests covering the rules above plus YAML-style round-trip via `model_dump`/`model_validate`.
+- Driver measurement surface and synthesis:
+  - `AnalyzerDriver.measure(setup) -> Iterator[Sample]` and `AnalyzerDriver.abort()` lifted to the abstract base. Drivers own the full measurement lifecycle; the engine just iterates and forwards.
+  - `MockDriver.measure()` synthesises plausible sweep data via `paramctl.driver.synth`: square-law NMOS Id when a companion V-source is present (treated as gate bias), Shockley diode otherwise; channel-length modulation, compliance clamping, and small Gaussian noise. Honours `hold_time` / `delay_time` / per-sample interval; aborts within ~50 ms via an internal `threading.Event`.
+  - `FlexDriver.measure()` / `abort()` raise `NotImplementedError` with a clear pointer to the upcoming FLEX commit; existing IDN/connect path unaffected.
+  - New module `paramctl.driver.synth` exposes `sweep_points()` (linear / log-decade / single / double-direction) and `synth_readings()`.
+- Engine layer (`paramctl.engine`):
+  - `run_sweep(driver, setup, abort_event=None) -> Iterator[SweepEvent]` — Qt-free generator that emits `SweepStarted` -> `SampleReady`* -> terminal `SweepCompleted` or `SweepFailed`. Driver exceptions are captured into `SweepFailed` so the ui can show them; `KeyboardInterrupt` and `SystemExit` propagate.
+  - Frozen-dataclass event types (`SweepStarted`, `SampleReady`, `SweepCompleted`, `SweepFailed`) and the `SweepEvent` union.
+- `examples/scripts/connect_and_idn.py` gains `--sweep`: runs an ID-VDS sweep at `V_GS = 1.5 V`, prints a tabular trace, and reports completion. Headless smoke test for the engine path.
+- 27 new tests across mock measurement, engine orchestration, synthesis math, and the M0 vertical-slice integration test (`test_id_vds_sweep_against_mock_produces_plottable_curve`). 93 unit + integration tests overall.

@@ -10,11 +10,14 @@ in ``manuals/4155and4156b_progguide.pdf`` covers in depth.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 
 import pyvisa
 import pyvisa.errors
 from pyvisa.resources import MessageBasedResource
 
+from ..models.results import Sample
+from ..models.setup import Setup
 from .base import AnalyzerDriver, CommunicationError, NotConnectedError
 
 logger = logging.getLogger(__name__)
@@ -120,6 +123,26 @@ class FlexDriver(AnalyzerDriver):
     @property
     def is_connected(self) -> bool:
         return self._instr is not None
+
+    def measure(self, setup: Setup) -> Iterator[Sample]:
+        """Run the sweep on the instrument. Pending implementation.
+
+        FLEX command-set translation (``*RST``, ``US``, ``FMT``, ``MM 1``,
+        ``DV``/``DI``, ``WV``/``WI``, ``XE``, data-buffer reads) lands in
+        a follow-up commit so this slice can be reviewed against the mock
+        first.
+        """
+        del setup  # silence unused-arg until the implementation lands
+        raise NotImplementedError(
+            "FlexDriver.measure() is not yet implemented; FLEX command-set "
+            "translation is the next driver-layer commit."
+        )
+
+    def abort(self) -> None:
+        """Send the FLEX abort. Pending implementation."""
+        raise NotImplementedError(
+            "FlexDriver.abort() is not yet implemented; pairs with measure()."
+        )
 
     def _require_instr(self) -> MessageBasedResource:
         if self._instr is None:
