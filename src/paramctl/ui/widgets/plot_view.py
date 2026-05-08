@@ -49,13 +49,34 @@ _HISTORY_ALPHA_MAX = 200
 
 @dataclass
 class _TraceRun:
-    """One completed-or-active run's curves on the plot."""
+    """One completed-or-active run's curves on the plot.
+
+    Stores the original ``Sample`` objects so CSV export and any future
+    analysis can reach back to timestamps, compliance flags, and the
+    per-channel reading map without depending on the plot's own derived
+    arrays.
+    """
 
     setup: Setup
+    samples: list[Sample] = field(default_factory=list)
     curves: dict[ChannelId, pg.PlotDataItem] = field(default_factory=dict)
-    x: list[float] = field(default_factory=list)
-    y_by_channel: dict[ChannelId, list[float]] = field(default_factory=dict)
-    compliance_by_channel: dict[ChannelId, list[bool]] = field(default_factory=dict)
+
+    def channel_series(
+        self, channel_id: ChannelId
+    ) -> tuple[list[float], list[float], list[bool]]:
+        xs: list[float] = []
+        ys: list[float] = []
+        hits: list[bool] = []
+        for s in self.samples:
+            if s.var1_value is None:
+                continue
+            value = s.readings.get(channel_id)
+            if value is None:
+                continue
+            xs.append(s.var1_value)
+            ys.append(value)
+            hits.append(s.compliance_hit)
+        return xs, ys, hits
 
 
 class PlotView(QWidget):
@@ -122,25 +143,17 @@ class PlotView(QWidget):
                 symbolPen=_ACTIVE_COLOUR,
             )
             run.curves[channel.channel_id] = curve
-            run.y_by_channel[channel.channel_id] = []
-            run.compliance_by_channel[channel.channel_id] = []
 
         self._active = run
 
     def add_sample(self, sample: Sample) -> None:
         if self._active is None or sample.var1_value is None:
             return
-        self._active.x.append(sample.var1_value)
+        self._active.samples.append(sample)
         for channel_id, curve in self._active.curves.items():
-            value = sample.readings.get(channel_id)
-            if value is None:
+            xs, ys, hits = self._active.channel_series(channel_id)
+            if not xs:
                 continue
-            self._active.y_by_channel[channel_id].append(value)
-            self._active.compliance_by_channel[channel_id].append(sample.compliance_hit)
-
-            xs = self._active.x[: len(self._active.y_by_channel[channel_id])]
-            ys = self._active.y_by_channel[channel_id]
-            hits = self._active.compliance_by_channel[channel_id]
             brushes = [
                 pg.mkBrush(_COMPLIANCE_COLOUR if hit else _ACTIVE_COLOUR)
                 for hit in hits

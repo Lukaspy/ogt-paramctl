@@ -102,8 +102,8 @@ def test_plot_view_records_per_point_compliance(qtbot) -> None:
 
     active = view.active_run
     assert active is not None
-    flags = active.compliance_by_channel[ChannelId.SMU1]
-    assert flags == [False, True, False, True, False]
+    _xs, _ys, hits = active.channel_series(ChannelId.SMU1)
+    assert hits == [False, True, False, True, False]
 
 
 def test_sample_default_compliance_hit_is_false() -> None:

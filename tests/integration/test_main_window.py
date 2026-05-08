@@ -114,7 +114,7 @@ def test_plot_accumulates_samples_in_active_run(qtbot, fast_driver) -> None:
 
     active = win._plot.active_run
     assert active is not None
-    assert len(active.x) == 11
+    assert len(active.samples) == 11
     _wait_for_thread_cleanup(qtbot, win)
 
 

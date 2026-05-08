@@ -16,9 +16,11 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -30,6 +32,12 @@ from PyQt6.QtWidgets import (
 from ..driver.base import AnalyzerDriver
 from ..models.results import Sample
 from ..models.setup import Setup
+from ..persistence import (
+    SetupFileError,
+    load_setup,
+    save_setup,
+    write_run_csv,
+)
 from .widgets import PlotView, SetupEditor
 from .workers import SweepWorker
 
@@ -62,17 +70,24 @@ class MainWindow(QMainWindow):
     # --- UI assembly --------------------------------------------------------
 
     def _build_ui(self) -> None:
+        self._open_btn = QPushButton("Open setup…")
+        self._save_btn = QPushButton("Save setup…")
         self._run_btn = QPushButton("Run")
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear traces")
+        self._export_btn = QPushButton("Export trace…")
+        self._export_btn.setEnabled(False)
         self._log_y_check = QCheckBox("Log Y")
         self._idn_label = QLabel(f"Driver: {type(self._driver).__name__}")
 
         toolbar = QHBoxLayout()
+        toolbar.addWidget(self._open_btn)
+        toolbar.addWidget(self._save_btn)
         toolbar.addWidget(self._run_btn)
         toolbar.addWidget(self._stop_btn)
         toolbar.addWidget(self._clear_btn)
+        toolbar.addWidget(self._export_btn)
         toolbar.addWidget(self._log_y_check)
         toolbar.addStretch()
         toolbar.addWidget(self._idn_label)
@@ -106,9 +121,12 @@ class MainWindow(QMainWindow):
         self._status_bar.addPermanentWidget(self._cursor_label)
 
     def _wire_buttons(self) -> None:
+        self._open_btn.clicked.connect(self._on_open_setup)
+        self._save_btn.clicked.connect(self._on_save_setup)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
         self._clear_btn.clicked.connect(self._on_clear)
+        self._export_btn.clicked.connect(self._on_export_trace)
         self._log_y_check.toggled.connect(self._plot.set_log_y)
         self._plot.cursor_changed.connect(self._cursor_label.setText)
 
@@ -168,7 +186,69 @@ class MainWindow(QMainWindow):
             )
             return
         self._plot.clear_history()
+        self._export_btn.setEnabled(False)
         self._status_bar.showMessage("Traces cleared.", 3000)
+
+    # --- persistence --------------------------------------------------------
+
+    def _on_open_setup(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Open setup", "", "YAML setups (*.yaml *.yml);;All files (*)"
+        )
+        if not path:
+            return
+        try:
+            setup = load_setup(path)
+        except SetupFileError as exc:
+            self._error_dialog("Could not open setup", str(exc))
+            return
+        self._editor.populate_from(setup)
+        self._status_bar.showMessage(f"Loaded {path}", 5000)
+
+    def _on_save_setup(self) -> None:
+        try:
+            setup = self._editor.current_setup()
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            location = ".".join(str(p) for p in first.get("loc", ()))
+            self._status_bar.showMessage(
+                f"Cannot save invalid setup: {location}: {first.get('msg', exc)}",
+                10000,
+            )
+            return
+        suggested = (setup.name or "setup").replace("/", "_") + ".yaml"
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Save setup", suggested, "YAML setups (*.yaml *.yml)"
+        )
+        if not path:
+            return
+        try:
+            save_setup(path, setup)
+        except OSError as exc:
+            self._error_dialog("Could not save setup", str(exc))
+            return
+        self._status_bar.showMessage(f"Saved {path}", 5000)
+
+    def _on_export_trace(self) -> None:
+        active = self._plot.active_run
+        if active is None or not active.samples:
+            self._status_bar.showMessage("No active trace to export.", 5000)
+            return
+        suggested = (active.setup.name or "trace").replace("/", "_") + ".csv"
+        path, _filter = QFileDialog.getSaveFileName(
+            self, "Export trace", suggested, "CSV traces (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            write_run_csv(path, active.setup, active.samples)
+        except OSError as exc:
+            self._error_dialog("Could not export trace", str(exc))
+            return
+        self._status_bar.showMessage(f"Exported {path}", 5000)
+
+    def _error_dialog(self, title: str, message: str) -> None:
+        QMessageBox.warning(self, title, message)
 
     # --- worker → ui slots --------------------------------------------------
 
@@ -181,6 +261,8 @@ class MainWindow(QMainWindow):
     def _on_completed(self, sample_count: int, aborted: bool) -> None:
         verb = "Aborted" if aborted else "Done"
         self._status_bar.showMessage(f"{verb} ({sample_count} samples)", 5000)
+        if sample_count > 0:
+            self._export_btn.setEnabled(True)
         self.sweep_completed.emit(sample_count, aborted)
 
     def _on_failed(self, exc: BaseException, sample_count: int) -> None:
