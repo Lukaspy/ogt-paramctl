@@ -1,0 +1,58 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Claude Code local session data
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vendor reference manuals (copyrighted Keysight/Agilent PDFs — kept locally for development reference, not redistributed)
+manuals/
+
+# Measurement output (must never be committed; fixtures and examples are explicit allow-listed below)
+*.csv
+*.h5
+*.hdf5
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/*.h5
+!tests/fixtures/**/*.hdf5
+!examples/**/*.csv
+!examples/**/*.h5
+!examples/**/*.hdf5
+
