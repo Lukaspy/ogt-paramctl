@@ -10,15 +10,25 @@ in ``manuals/4155and4156b_progguide.pdf`` covers in depth.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Iterator
 
 import pyvisa
 import pyvisa.errors
 from pyvisa.resources import MessageBasedResource
 
+from ..models.measurement import SweepMeasurement
 from ..models.results import Sample
 from ..models.setup import Setup
 from .base import AnalyzerDriver, CommunicationError, NotConnectedError
+from .flex_protocol import (
+    FlexField,
+    FlexProtocolError,
+    build_setup_commands,
+    expected_value_count,
+    parse_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +68,7 @@ class FlexDriver(AnalyzerDriver):
         self._external_rm = resource_manager is not None
         self._rm: pyvisa.ResourceManager | None = resource_manager
         self._instr: MessageBasedResource | None = None
+        self._abort_event = threading.Event()
 
     @property
     def resource_string(self) -> str:
@@ -125,24 +136,147 @@ class FlexDriver(AnalyzerDriver):
         return self._instr is not None
 
     def measure(self, setup: Setup) -> Iterator[Sample]:
-        """Run the sweep on the instrument. Pending implementation.
+        """Run the sweep on the 4155/4156 and yield samples in acquisition order.
 
-        FLEX command-set translation (``*RST``, ``US``, ``FMT``, ``MM 1``,
-        ``DV``/``DI``, ``WV``/``WI``, ``XE``, data-buffer reads) lands in
-        a follow-up commit so this slice can be reviewed against the mock
-        first.
+        Translates the ``Setup`` to a FLEX command sequence (``US``, ``FMT 1,1``,
+        ``CN``, ``WV``/``WI``, ``DV``/``DI``, ``WT``, ``MM 2``), executes ``XE``,
+        polls ``NUB?`` until the buffer holds the expected number of values, and
+        reads the result with ``RMD?``. The 4155 does not stream individual
+        samples in this mode; the driver therefore reads the full sweep at the
+        end. Live UI updates are still possible — the driver yields samples
+        one-at-a-time after the read, and the engine emits them as
+        ``SampleReady`` events as it iterates.
+
+        Raises:
+            NotConnectedError: If ``connect()`` has not been called.
+            CommunicationError: For VISA-level failures.
+            NotImplementedError: For non-sweep measurement modes.
         """
-        del setup  # silence unused-arg until the implementation lands
-        raise NotImplementedError(
-            "FlexDriver.measure() is not yet implemented; FLEX command-set "
-            "translation is the next driver-layer commit."
-        )
+        instr = self._require_instr()
+        if not isinstance(setup.measurement, SweepMeasurement):
+            raise NotImplementedError(
+                "FlexDriver currently only supports sweep measurements; "
+                f"got {type(setup.measurement).__name__}."
+            )
+        return self._run_sweep(instr, setup, setup.measurement)
 
     def abort(self) -> None:
-        """Send the FLEX abort. Pending implementation."""
-        raise NotImplementedError(
-            "FlexDriver.abort() is not yet implemented; pairs with measure()."
-        )
+        """Mark the in-flight sweep cancelled and clear it from the bus.
+
+        The flag is honoured by the polling loop in ``_run_sweep``. As a
+        belt-and-braces measure we also send a GPIB Device Clear via
+        ``visalib.clear`` so any in-progress instrument I/O is reset.
+        """
+        self._abort_event.set()
+        instr = self._instr
+        if instr is None:
+            return
+        try:
+            instr.clear()
+        except pyvisa.errors.VisaIOError:
+            logger.exception("FlexDriver.abort: GPIB clear failed; continuing")
+
+    _NUB_POLL_INTERVAL_S: float = 0.1
+
+    def _run_sweep(
+        self,
+        instr: MessageBasedResource,
+        setup: Setup,
+        sweep: SweepMeasurement,
+    ) -> Iterator[Sample]:
+        self._abort_event.clear()
+        try:
+            commands = build_setup_commands(setup)
+        except FlexProtocolError as exc:
+            raise CommunicationError(str(exc)) from exc
+
+        for cmd in commands:
+            self._write(instr, cmd)
+        self._write(instr, "XE")
+
+        expected = expected_value_count(sweep)
+        if not self._wait_for_data(instr, expected):
+            self._safe_disable_channels(instr)
+            return
+
+        try:
+            response = instr.query(f"RMD? {expected}").strip()
+        except pyvisa.errors.VisaIOError as exc:
+            raise CommunicationError("RMD? query failed") from exc
+
+        try:
+            fields = parse_response(response)
+        except FlexProtocolError as exc:
+            raise CommunicationError(
+                f"could not parse FLEX response: {exc}"
+            ) from exc
+
+        if len(fields) != expected:
+            raise CommunicationError(
+                f"FLEX response field count mismatch: expected {expected}, got {len(fields)}"
+            )
+
+        try:
+            yield from self._samples_from_fields(fields)
+        finally:
+            self._safe_disable_channels(instr)
+
+    def _wait_for_data(self, instr: MessageBasedResource, expected: int) -> bool:
+        """Block until ``NUB?`` reports >= ``expected`` values, or abort.
+
+        Returns ``True`` when the data is ready, ``False`` if the abort flag
+        was set before the buffer filled.
+        """
+        while not self._abort_event.is_set():
+            try:
+                nub = int(instr.query("NUB?").strip())
+            except pyvisa.errors.VisaIOError as exc:
+                raise CommunicationError("NUB? poll failed") from exc
+            if nub >= expected:
+                return True
+            time.sleep(self._NUB_POLL_INTERVAL_S)
+        return False
+
+    def _samples_from_fields(self, fields: list[FlexField]) -> Iterator[Sample]:
+        # FMT 1,1 layout: per sweep point, a measurement field followed by a
+        # source-data field. Group into pairs; carry through any extra
+        # measurement-side channels in the future by extending this loop.
+        if len(fields) % 2 != 0:
+            raise CommunicationError(
+                f"FMT 1,1 expects measurement+source pairs but got {len(fields)} fields"
+            )
+
+        for index, pair_start in enumerate(range(0, len(fields), 2)):
+            measured = fields[pair_start]
+            source = fields[pair_start + 1]
+
+            if measured.is_source:
+                # Some setups echo source first; swap.
+                measured, source = source, measured
+            if not source.is_source:
+                raise CommunicationError(
+                    f"expected one source field per pair at index {index}; "
+                    f"got two measurement fields"
+                )
+
+            yield Sample(
+                index=index,
+                var1_value=source.value,
+                readings={measured.channel: measured.value},
+                timestamp=None,
+            )
+
+    def _write(self, instr: MessageBasedResource, command: str) -> None:
+        try:
+            instr.write(command)
+        except pyvisa.errors.VisaIOError as exc:
+            raise CommunicationError(f"FLEX write failed: {command!r}") from exc
+
+    def _safe_disable_channels(self, instr: MessageBasedResource) -> None:
+        try:
+            instr.write("CL")
+        except pyvisa.errors.VisaIOError:
+            logger.exception("FlexDriver: CL (channel disable) failed; continuing")
 
     def _require_instr(self) -> MessageBasedResource:
         if self._instr is None:

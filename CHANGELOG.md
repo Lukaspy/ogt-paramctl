@@ -42,3 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Frozen-dataclass event types (`SweepStarted`, `SampleReady`, `SweepCompleted`, `SweepFailed`) and the `SweepEvent` union.
 - `examples/scripts/connect_and_idn.py` gains `--sweep`: runs an ID-VDS sweep at `V_GS = 1.5 V`, prints a tabular trace, and reports completion. Headless smoke test for the engine path.
 - 27 new tests across mock measurement, engine orchestration, synthesis math, and the M0 vertical-slice integration test (`test_id_vds_sweep_against_mock_produces_plottable_curve`). 93 unit + integration tests overall.
+- FlexDriver: real-hardware sweep implementation (`measure()` / `abort()`):
+  - `paramctl.driver.flex_protocol` — pure command-builder + FMT 1,1 response parser, isolated from PyVISA so the parser is unit-tested without an instrument. Captures the 18-char-per-field FLEX wire format (`<3-char status><1-char channel A..D><1-char type V/I/v/i><13-char number>`) decoded from a real probe of the 4155B.
+  - `FlexDriver.measure()` translates a `Setup` into the documented FLEX sequence (`US`, `FMT 1,1`, `CN`, `WV`/`WI`, `DV`/`DI`, `WT`, `MM 2`, `XE`), polls `NUB?` until the buffer holds the expected data, reads with `RMD?`, and yields `Sample`s in acquisition order. SMU1..SMU4 only for now; VSU/VMU support is a follow-up.
+  - `FlexDriver.abort()` sets the abort flag and issues a GPIB Device Clear so an in-flight sweep is interrupted promptly. The polling loop honours the flag between `NUB?` polls.
+  - Sweep modes (1/2/3/4) and direction (SINGLE/DOUBLE) round-trip through the command builder; log scales (LOG10/25/50) map to FLEX modes 3 (single) and 4 (double).
+- 26 new unit tests for the FLEX command builder and parser (against a real captured response). 4 hardware tests now passing on a 4155B (firmware 03.10) — IDN, context manager, open-circuit V-sweep with exact source-data check, and the M0 step-3 ID-VDS setup end-to-end.
+- `examples/scripts/connect_and_idn.py --resource '<visa>' --sweep` runs the same sweep on real hardware and prints the trace.
