@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -65,12 +66,14 @@ class MainWindow(QMainWindow):
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear traces")
+        self._log_y_check = QCheckBox("Log Y")
         self._idn_label = QLabel(f"Driver: {type(self._driver).__name__}")
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(self._run_btn)
         toolbar.addWidget(self._stop_btn)
         toolbar.addWidget(self._clear_btn)
+        toolbar.addWidget(self._log_y_check)
         toolbar.addStretch()
         toolbar.addWidget(self._idn_label)
 
@@ -99,11 +102,15 @@ class MainWindow(QMainWindow):
 
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
+        self._cursor_label = QLabel("")
+        self._status_bar.addPermanentWidget(self._cursor_label)
 
     def _wire_buttons(self) -> None:
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
         self._clear_btn.clicked.connect(self._on_clear)
+        self._log_y_check.toggled.connect(self._plot.set_log_y)
+        self._plot.cursor_changed.connect(self._cursor_label.setText)
 
     # --- run / stop / clear -------------------------------------------------
 

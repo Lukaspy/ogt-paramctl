@@ -72,3 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Live unit propagation: changing SMU1's mode from V_SOURCE to I_SOURCE flips the row's source/compliance unit suffixes (V↔A) and the sweep panel's start/stop suffixes simultaneously. `ChannelPanel` emits `channels_changed` on structural edits (enable / mode / function); `SetupEditor` listens and pushes the VAR1 unit into `SweepPanel.set_var1_unit()`.
   - Hold time / delay time show `"0 s"` / `"50 ms"` etc., independent of VAR1 mode (they are always seconds).
 - 57 new tests cover the SI formatter/parser (parametrised at 14 input forms), the `SiFloatEdit` widget (initial render, set_value, set_unit, parse on edit-finished, invalid input restoration, value_changed signal semantics), and dynamic unit propagation across the editor. 192 unit + integration tests in total.
+- Plot quality of life:
+  - Axis labels reflect the active VAR1 channel's label and source mode: V_SOURCE → "<label> voltage" (V) on X, "<label> current" (A) on Y; I_SOURCE swaps them.
+  - `set_log_y` toggle on `PlotView` plus a Log-Y toolbar checkbox in `MainWindow`. When enabled, the cursor readout converts the displayed log value back to linear so the status bar shows real units.
+  - Mouse-hover cursor: a dashed vertical line tracks the pointer; `cursor_changed` emits a pre-formatted `"X: 1.5 V    Y: 200 uA"` string that the main window pins to a permanent right-side status-bar widget.
+- 12 new tests across `PlotView` (axis units, log-Y toggle, cursor formatting, log-Y persistence across runs) and `MainWindow` (Log-Y checkbox, cursor label updates from signal). 204 unit + integration tests in total; 4 hardware tests still pass.

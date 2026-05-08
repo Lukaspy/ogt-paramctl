@@ -5,43 +5,43 @@ the active trace is visually distinct. Useful workflow: tweak a parameter,
 run, compare against the previous trace; older traces stay visible until
 you call ``clear_history()``.
 
-The widget is dumb — it knows nothing about drivers, engines, or threads.
-The MainWindow feeds it ``Sample`` instances via signal-slot connections
-and calls ``begin_run(setup)`` immediately before each run.
+Quality-of-life features in this revision:
+    - Axis labels reflect the active VAR1 channel's label and source mode.
+    - ``set_log_y`` toggles a logarithmic Y axis (essential for diode IV).
+    - Mouse hover emits a formatted ``cursor_changed`` signal carrying the
+      current X/Y position so the main window can show it in the status bar.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from ...models.channel import ChannelConfig, ChannelFunction, ChannelId, ChannelMode
 from ...models.results import Sample
 from ...models.setup import Setup
+from ...util.units import format_si
 
 logger = logging.getLogger(__name__)
 
 
-# Bright primary colour used for the active (in-progress / most-recent) trace.
 _ACTIVE_COLOUR = QColor("yellow")
 _ACTIVE_LINE_WIDTH = 2
 
-# Cycled palette for historical traces. Each completed run picks the next
-# colour; the alpha is then shaped by age in ``_recolour_history``.
 _HISTORY_HUES: tuple[QColor, ...] = (
-    QColor(255, 140, 0),    # orange
-    QColor(0, 200, 255),    # azure
-    QColor(255, 80, 200),   # pink
-    QColor(120, 255, 80),   # lime
-    QColor(180, 130, 255),  # violet
-    QColor(255, 220, 80),   # gold
+    QColor(255, 140, 0),
+    QColor(0, 200, 255),
+    QColor(255, 80, 200),
+    QColor(120, 255, 80),
+    QColor(180, 130, 255),
+    QColor(255, 220, 80),
 )
 _HISTORY_LINE_WIDTH = 1
-# Oldest trace fades down to this alpha. Newer traces interpolate up to
-# the full-strength _HISTORY_ALPHA_MAX.
 _HISTORY_ALPHA_MIN = 60
 _HISTORY_ALPHA_MAX = 200
 
@@ -57,7 +57,15 @@ class _TraceRun:
 
 
 class PlotView(QWidget):
-    """Plots ``Sample`` data live with multi-run history."""
+    """Plots ``Sample`` data live with multi-run history.
+
+    Signals:
+        cursor_changed(str): A pre-formatted "X = …, Y = …" string emitted
+            when the mouse moves over the plot area. Empty string when the
+            mouse leaves. Connect to a status-bar label.
+    """
+
+    cursor_changed = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -68,6 +76,15 @@ class PlotView(QWidget):
         self._plot.setLabel("bottom", "VAR1")
         self._plot.setLabel("left", "Reading")
 
+        self._cursor_line = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen("#888", width=1, style=Qt.PenStyle.DashLine),
+        )
+        self._cursor_line.setVisible(False)
+        self._plot.addItem(self._cursor_line, ignoreBounds=True)
+        self._plot.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._plot)
@@ -75,6 +92,9 @@ class PlotView(QWidget):
         self._history: list[_TraceRun] = []
         self._active: _TraceRun | None = None
         self._run_counter = 0
+        self._x_unit: str = ""
+        self._y_unit: str = ""
+        self._log_y = False
 
     # -- run lifecycle -------------------------------------------------------
 
@@ -105,9 +125,7 @@ class PlotView(QWidget):
         self._active = run
 
     def add_sample(self, sample: Sample) -> None:
-        if self._active is None:
-            return
-        if sample.var1_value is None:
+        if self._active is None or sample.var1_value is None:
             return
         self._active.x.append(sample.var1_value)
         for channel_id, curve in self._active.curves.items():
@@ -130,32 +148,38 @@ class PlotView(QWidget):
         self._active = None
         self._run_counter = 0
 
+    # -- toggles -------------------------------------------------------------
+
+    def set_log_y(self, enabled: bool) -> None:
+        """Toggle a base-10 logarithmic Y axis. Negative-Y points become NaN."""
+        self._log_y = bool(enabled)
+        self._plot.setLogMode(y=self._log_y)
+
+    def is_log_y(self) -> bool:
+        return self._log_y
+
     # -- styling -------------------------------------------------------------
 
     def _configure_axes(self, setup: Setup) -> None:
         var1 = next(c for c in setup.channels if c.function is ChannelFunction.VAR1)
-        x_unit = "V" if var1.mode is ChannelMode.V_SOURCE else "A"
-        self._plot.setLabel(
-            "bottom", var1.label or var1.channel_id.value, units=x_unit
-        )
-
-        # Y axis follows the VAR1 mode: V-source measures current, I-source
-        # measures voltage. Until multi-channel measurement lands, this stays
-        # tied to the VAR1 channel.
-        y_unit = "A" if var1.mode is ChannelMode.V_SOURCE else "V"
-        self._plot.setLabel("left", "Reading", units=y_unit)
+        name = var1.label or var1.channel_id.value
+        if var1.mode is ChannelMode.V_SOURCE:
+            self._x_unit = "V"
+            self._y_unit = "A"
+            self._plot.setLabel("bottom", f"{name} voltage", units="V")
+            self._plot.setLabel("left", f"{name} current", units="A")
+        else:
+            self._x_unit = "A"
+            self._y_unit = "V"
+            self._plot.setLabel("bottom", f"{name} current", units="A")
+            self._plot.setLabel("left", f"{name} voltage", units="V")
 
     def _recolour_history(self) -> None:
-        """Walk historical curves and reapply colour + alpha based on age.
-
-        Most-recent history runs get the brightest historical colour; older
-        runs fade towards _HISTORY_ALPHA_MIN.
-        """
         if not self._history:
             return
         n = len(self._history)
         for index, run in enumerate(self._history):
-            age_factor = (index + 1) / n  # newest history -> 1.0, oldest -> 1/n
+            age_factor = (index + 1) / n
             alpha = int(
                 _HISTORY_ALPHA_MIN
                 + (_HISTORY_ALPHA_MAX - _HISTORY_ALPHA_MIN) * age_factor
@@ -177,6 +201,36 @@ class PlotView(QWidget):
         base = channel.label or channel.channel_id.value
         return f"#{run_number} {base}"
 
+    # -- cursor --------------------------------------------------------------
+
+    def _on_mouse_moved(self, pos: object) -> None:
+        # ``pos`` is a QPointF in scene coordinates.
+        from PyQt6.QtCore import QPointF
+
+        if not isinstance(pos, QPointF):
+            return
+        item = self._plot.plotItem
+        if not item.sceneBoundingRect().contains(pos):
+            self._cursor_line.setVisible(False)
+            self.cursor_changed.emit("")
+            return
+
+        view_pos = item.vb.mapSceneToView(pos)
+        x = view_pos.x()
+        y = view_pos.y()
+
+        # If log-Y is on, the displayed Y is log10(value); raise back to linear.
+        if self.is_log_y():
+            with contextlib.suppress(OverflowError, ValueError):
+                y = pow(10.0, y)
+
+        self._cursor_line.setPos(x)
+        self._cursor_line.setVisible(True)
+
+        x_str = format_si(x, unit=self._x_unit) if self._x_unit else format_si(x)
+        y_str = format_si(y, unit=self._y_unit) if self._y_unit else format_si(y)
+        self.cursor_changed.emit(f"X: {x_str}    Y: {y_str}")
+
     # -- testing affordances -------------------------------------------------
 
     @property
@@ -187,13 +241,17 @@ class PlotView(QWidget):
     def history(self) -> list[_TraceRun]:
         return list(self._history)
 
+    @property
+    def x_unit(self) -> str:
+        return self._x_unit
+
+    @property
+    def y_unit(self) -> str:
+        return self._y_unit
+
 
 def _measured_channels(setup: Setup) -> list[ChannelConfig]:
-    """Channels we plot a curve for. Currently the VAR1 channel only.
-
-    Expand to include companion measurement channels once FlexDriver issues
-    multi-channel ``MM`` commands.
-    """
+    """Channels we plot a curve for. Currently the VAR1 channel only."""
     return [c for c in setup.channels if c.function is ChannelFunction.VAR1]
 
 
