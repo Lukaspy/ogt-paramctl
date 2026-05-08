@@ -22,3 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `tests/unit/` covers the ABC contract and `MockDriver` end-to-end (14 tests).
   - `tests/hardware/` is registered behind the `hardware` marker; skipped by default.
 - `examples/scripts/connect_and_idn.py` — headless smoke test exercising discovery, connect, `*IDN?`, and disconnect against either a real instrument or the mock.
+- Pydantic v2 models layer (`paramctl.models`):
+  - `ChannelId` enum (SMU1..SMU4, VSU1..VSU2, VMU1..VMU2, GNDU) plus `is_smu` / `is_vsu` / `is_vmu` helpers.
+  - `ChannelMode` (V_SOURCE / I_SOURCE / COMMON / DISABLED) and `ChannelFunction` (VAR1 / VAR2 / VAR1_PRIME / CONST) enums.
+  - `ChannelConfig` — frozen, extra-forbidden, with `model_validator` enforcing hardware-shaped rules: GNDU is always COMMON, VMU cannot source, VSU cannot I-source, sweep functions require a source mode, SMU sources require positive compliance, DISABLED channels cannot have a sweep function.
+  - `ChannelLimits` — per-channel safety ceilings (max voltage, max current).
+  - `SweepRange` (start / stop / points / scale / direction) with log-sweep zero-crossing rejection; `SweepScale` (LINEAR, LOG10/25/50) and `SweepDirection` (SINGLE, DOUBLE) enums; `Var1PrimeLink`.
+  - `MeasurementMode` discriminated union over `SweepMeasurement` / `SamplingMeasurement` / `SpotMeasurement` (sampling and spot are shells; sweep is fully populated for M0).
+  - `Setup` — top-level model: schema_version (pinned to 1), channels list, measurement, optional safety_ceilings dict, optional last-used resource_string. Cross-channel validation: unique channel_id, exactly-one VAR1/VAR2/VAR1' pairing with the measurement, ceiling enforcement on source values and compliance.
+  - `Sample` and `MeasurementResult` shells for the engine layer to populate later.
+- 52 model tests covering the rules above plus YAML-style round-trip via `model_dump`/`model_validate`.
