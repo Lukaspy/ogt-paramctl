@@ -190,13 +190,35 @@ def _fmt(value: float) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FlexField:
-    """One parsed field from a FMT 1 response."""
+    """One parsed field from a FMT 1 response.
+
+    The status string is preserved verbatim for diagnostics. Common codes
+    observed on a 4155B in the wild:
+        - ``"000"`` — normal measurement, no flags.
+        - ``"008"`` — compliance reached on the measured channel.
+        - ``"  W"`` / ``"  E"`` — sweep position markers attached to source
+          data fields (W = intermediate step, E = end of sweep).
+    """
 
     status: str
     channel: ChannelId
     is_source: bool
     is_voltage: bool
     value: float
+
+    @property
+    def compliance_hit(self) -> bool:
+        """``True`` when the third status character flags compliance reached.
+
+        Only meaningful for measurement fields; source-data fields use the
+        status area for sweep-position markers (``W`` / ``E``) and never
+        carry the ``8`` compliance flag.
+        """
+        if self.is_source:
+            return False
+        if len(self.status) < 3:
+            return False
+        return self.status[2] == "8"
 
 
 def parse_field(field: str) -> FlexField:

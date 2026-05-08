@@ -26,6 +26,10 @@ class Sample(BaseModel):
             channel's mode determines which.
         timestamp: Seconds since the start of the run; ``None`` if the
             instrument did not provide a timestamp.
+        compliance_hit: ``True`` if the measured channel reached its
+            compliance limit at this sample. The driver translates
+            instrument-specific status flags into this bool so layers
+            above the driver do not deal with FLEX status codes directly.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -35,6 +39,7 @@ class Sample(BaseModel):
     var2_value: float | None = None
     readings: dict[ChannelId, float] = Field(default_factory=dict)
     timestamp: float | None = None
+    compliance_hit: bool = False
 
 
 class MeasurementResult(BaseModel):

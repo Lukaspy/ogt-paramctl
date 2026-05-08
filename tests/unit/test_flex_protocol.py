@@ -276,3 +276,28 @@ def test_parse_field_status_codes_round_trip() -> None:
     last_point = parse_field("  EAv+5.000000E-01")
     assert intermediate.status == "  W"
     assert last_point.status == "  E"
+
+
+def test_parse_field_compliance_hit_flag_for_normal_status() -> None:
+    # Real captured normal-measurement field; status "000" -> no compliance.
+    field = parse_field("000AI+7.500000E-14")
+    assert field.compliance_hit is False
+
+
+def test_parse_field_compliance_hit_flag_for_compliance_status() -> None:
+    # Real captured compliance-reached field; status "008" -> compliance set.
+    # Captured from a 4155B forcing 1 mA into open circuit with Vcomp=2 V.
+    field = parse_field("008AV+2.000028E+00")
+    assert field.compliance_hit is True
+    assert field.value == pytest.approx(2.000028)
+
+
+def test_parse_field_compliance_hit_false_for_source_data() -> None:
+    """Source-data fields use the status area for sweep markers, never
+    encode compliance there. ``W`` and ``E`` markers must not be flagged
+    as compliance hits.
+    """
+    intermediate = parse_field("  WAv+1.000000E-01")
+    last_point = parse_field("  EAv+5.000000E-01")
+    assert intermediate.compliance_hit is False
+    assert last_point.compliance_hit is False

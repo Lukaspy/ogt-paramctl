@@ -117,12 +117,13 @@ class MockDriver(AnalyzerDriver):
                 if sweep.delay_time > 0:
                     self._interruptible_sleep(sweep.delay_time)
 
-                readings = synth_readings(setup, sweep, value)
+                readings, compliance_hit = synth_readings(setup, sweep, value)
                 sample = Sample(
                     index=index,
                     var1_value=value,
                     readings=readings,
                     timestamp=time.monotonic() - start_time,
+                    compliance_hit=compliance_hit,
                 )
 
                 if self._inter_sample_delay_s > 0:

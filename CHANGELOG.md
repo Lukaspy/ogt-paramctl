@@ -77,3 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `set_log_y` toggle on `PlotView` plus a Log-Y toolbar checkbox in `MainWindow`. When enabled, the cursor readout converts the displayed log value back to linear so the status bar shows real units.
   - Mouse-hover cursor: a dashed vertical line tracks the pointer; `cursor_changed` emits a pre-formatted `"X: 1.5 V    Y: 200 uA"` string that the main window pins to a permanent right-side status-bar widget.
 - 12 new tests across `PlotView` (axis units, log-Y toggle, cursor formatting, log-Y persistence across runs) and `MainWindow` (Log-Y checkbox, cursor label updates from signal). 204 unit + integration tests in total; 4 hardware tests still pass.
+- Compliance-reached visual indicator:
+  - `Sample` model gains a `compliance_hit: bool` field (default `False`); flag is now part of the canonical sample shape that flows from driver to UI.
+  - `FlexField.compliance_hit` decoded from the FLEX status code: empirically the third digit of the status string is `8` when the 4155 reaches compliance (real capture: status flips from `000` to `008` the instant the instrument rails to the voltage compliance limit when I-sourcing into open circuit with Vcomp=2V).
+  - `MockDriver` synth marks samples as `compliance_hit=True` whenever its model output exceeds the channel's compliance and gets clamped, so the mock-side path exercises the same plot rendering as the real instrument.
+  - `PlotView` renders compliance-hit points in bright red (with red marker pen) instead of the active yellow, so they stand out at a glance against the live curve.
+- 10 new tests cover the parser flag, mock synth flagging, plot per-point recording, `Sample` round-trip, and a regression test pinning the real captured `008` status to the compliance interpretation. 214 unit + integration tests total; 4 hardware tests still pass.

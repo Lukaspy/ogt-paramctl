@@ -118,8 +118,8 @@ def synth_readings(
     *,
     noise_floor: float = 1e-12,
     noise_ratio: float = 0.005,
-) -> dict[ChannelId, float]:
-    """Compute a plausible reading per active channel for one sweep step.
+) -> tuple[dict[ChannelId, float], bool]:
+    """Compute readings for one sweep step plus a compliance-hit flag.
 
     Currently models:
         - VAR1 V-sourcing SMU: drain current via MOSFET square-law if a
@@ -130,7 +130,9 @@ def synth_readings(
         - Disabled / VMU / GNDU channels: omitted from readings.
 
     All currents/voltages get clamped to channel compliance and a small
-    Gaussian noise term applied for realism.
+    Gaussian noise term applied for realism. The returned bool is ``True``
+    iff the unclamped model output exceeded the VAR1 channel's compliance
+    (i.e. the instrument would have hit compliance there).
     """
     var1 = next(c for c in setup.channels if c.function is ChannelFunction.VAR1)
     readings: dict[ChannelId, float] = {}
@@ -144,9 +146,9 @@ def synth_readings(
     else:  # I_SOURCE
         primary = var1_value * 1_000.0  # 1 kΩ resistor model -> volts
 
-    primary = _clamp_to_compliance(primary, var1.compliance)
+    clamped, compliance_hit = _clamp_to_compliance(primary, var1.compliance)
     readings[var1.channel_id] = _add_noise(
-        primary, noise_floor=noise_floor, noise_ratio=noise_ratio
+        clamped, noise_floor=noise_floor, noise_ratio=noise_ratio
     )
 
     for ch in setup.channels:
@@ -160,17 +162,20 @@ def synth_readings(
 
     # var2 unused for now; M0 only exercises VAR1 sweeps.
     del sweep
-    return readings
+    return readings, compliance_hit
 
 
-def _clamp_to_compliance(value: float, compliance: float | None) -> float:
+def _clamp_to_compliance(
+    value: float, compliance: float | None
+) -> tuple[float, bool]:
+    """Clamp ``value`` to ``±compliance``; second return is ``True`` when clamped."""
     if compliance is None:
-        return value
+        return value, False
     if value > compliance:
-        return compliance
+        return compliance, True
     if value < -compliance:
-        return -compliance
-    return value
+        return -compliance, True
+    return value, False
 
 
 __all__ = ["sweep_points", "synth_readings"]

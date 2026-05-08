@@ -90,7 +90,7 @@ def test_synth_id_increases_with_vds_in_saturation() -> None:
     sweep = setup.measurement
     assert isinstance(sweep, SweepMeasurement)
 
-    samples = [synth_readings(setup, sweep, vds) for vds in [0.0, 0.5, 1.0, 1.5, 2.0]]
+    samples = [synth_readings(setup, sweep, vds)[0] for vds in [0.0, 0.5, 1.0, 1.5, 2.0]]
     ids = [s[ChannelId.SMU1] for s in samples]
 
     assert ids[0] < ids[1] < ids[2]
@@ -104,8 +104,8 @@ def test_synth_subthreshold_returns_near_zero() -> None:
     sweep = setup.measurement
     assert isinstance(sweep, SweepMeasurement)
 
-    reading = synth_readings(setup, sweep, 1.0)[ChannelId.SMU1]
-    assert abs(reading) < 1e-9
+    readings, _hit = synth_readings(setup, sweep, 1.0)
+    assert abs(readings[ChannelId.SMU1]) < 1e-9
 
 
 def test_synth_compliance_clamps_current() -> None:
@@ -114,10 +114,9 @@ def test_synth_compliance_clamps_current() -> None:
     sweep = setup.measurement
     assert isinstance(sweep, SweepMeasurement)
 
-    reading = synth_readings(setup, sweep, 1.5, noise_floor=0.0, noise_ratio=0.0)[
-        ChannelId.SMU1
-    ]
-    assert reading == pytest.approx(1e-6, rel=1e-9)
+    readings, hit = synth_readings(setup, sweep, 1.5, noise_floor=0.0, noise_ratio=0.0)
+    assert readings[ChannelId.SMU1] == pytest.approx(1e-6, rel=1e-9)
+    assert hit is True
 
 
 def test_synth_diode_when_no_companion_v_source() -> None:
@@ -137,10 +136,10 @@ def test_synth_diode_when_no_companion_v_source() -> None:
     sweep = setup.measurement
     assert isinstance(sweep, SweepMeasurement)
 
-    rev = synth_readings(setup, sweep, -0.3, noise_floor=0.0, noise_ratio=0.0)[
+    rev = synth_readings(setup, sweep, -0.3, noise_floor=0.0, noise_ratio=0.0)[0][
         ChannelId.SMU1
     ]
-    fwd = synth_readings(setup, sweep, 0.6, noise_floor=0.0, noise_ratio=0.0)[
+    fwd = synth_readings(setup, sweep, 0.6, noise_floor=0.0, noise_ratio=0.0)[0][
         ChannelId.SMU1
     ]
     # Forward bias produces orders of magnitude more current than reverse.
@@ -173,7 +172,7 @@ def test_synth_omits_disabled_and_passive_channels() -> None:
     sweep = setup.measurement
     assert isinstance(sweep, SweepMeasurement)
 
-    readings = synth_readings(setup, sweep, 0.5)
+    readings, _hit = synth_readings(setup, sweep, 0.5)
     assert ChannelId.SMU1 in readings
     assert ChannelId.SMU2 in readings
     assert ChannelId.SMU3 not in readings

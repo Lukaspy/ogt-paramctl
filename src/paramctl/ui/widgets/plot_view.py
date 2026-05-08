@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_COLOUR = QColor("yellow")
 _ACTIVE_LINE_WIDTH = 2
+_COMPLIANCE_COLOUR = QColor(255, 60, 60)  # bright red — drowns out yellow
 
 _HISTORY_HUES: tuple[QColor, ...] = (
     QColor(255, 140, 0),
@@ -54,6 +55,7 @@ class _TraceRun:
     curves: dict[ChannelId, pg.PlotDataItem] = field(default_factory=dict)
     x: list[float] = field(default_factory=list)
     y_by_channel: dict[ChannelId, list[float]] = field(default_factory=dict)
+    compliance_by_channel: dict[ChannelId, list[bool]] = field(default_factory=dict)
 
 
 class PlotView(QWidget):
@@ -115,12 +117,13 @@ class PlotView(QWidget):
                 pen=pg.mkPen(_ACTIVE_COLOUR, width=_ACTIVE_LINE_WIDTH),
                 name=label,
                 symbol="o",
-                symbolSize=4,
+                symbolSize=5,
                 symbolBrush=_ACTIVE_COLOUR,
                 symbolPen=_ACTIVE_COLOUR,
             )
             run.curves[channel.channel_id] = curve
             run.y_by_channel[channel.channel_id] = []
+            run.compliance_by_channel[channel.channel_id] = []
 
         self._active = run
 
@@ -133,8 +136,19 @@ class PlotView(QWidget):
             if value is None:
                 continue
             self._active.y_by_channel[channel_id].append(value)
+            self._active.compliance_by_channel[channel_id].append(sample.compliance_hit)
+
             xs = self._active.x[: len(self._active.y_by_channel[channel_id])]
-            curve.setData(xs, self._active.y_by_channel[channel_id])
+            ys = self._active.y_by_channel[channel_id]
+            hits = self._active.compliance_by_channel[channel_id]
+            brushes = [
+                pg.mkBrush(_COMPLIANCE_COLOUR if hit else _ACTIVE_COLOUR)
+                for hit in hits
+            ]
+            symbol_pens = [
+                pg.mkPen(_COMPLIANCE_COLOUR if hit else _ACTIVE_COLOUR) for hit in hits
+            ]
+            curve.setData(xs, ys, symbolBrush=brushes, symbolPen=symbol_pens)
 
     def clear_history(self) -> None:
         """Remove every run from the plot, including the active one."""

@@ -271,6 +271,7 @@ class FlexDriver(AnalyzerDriver):
                 var1_value=source.value,
                 readings={measured.channel: measured.value},
                 timestamp=None,
+                compliance_hit=measured.compliance_hit,
             )
 
     def _write(self, instr: MessageBasedResource, command: str) -> None:
