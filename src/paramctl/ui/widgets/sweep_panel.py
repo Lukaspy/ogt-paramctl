@@ -1,4 +1,10 @@
-"""Sweep editor: VAR1 range, scale, direction, integration, hold/delay times."""
+"""Sweep editor: VAR1 range, scale, direction, integration, hold/delay times.
+
+Start/stop fields take their unit from the current VAR1 channel (V when the
+VAR1 channel is V-sourcing, A when I-sourcing). The owning ``SetupEditor``
+calls :meth:`set_var1_unit` whenever the channel panel announces a
+structural change, so the labels track the editor live.
+"""
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
@@ -16,7 +22,7 @@ from ...models.measurement import (
     SweepRange,
     SweepScale,
 )
-from ._float_edit import FloatEdit
+from ._si_float_edit import SiFloatEdit
 
 
 class SweepPanel(QGroupBox):
@@ -25,8 +31,8 @@ class SweepPanel(QGroupBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Sweep (VAR1)", parent)
 
-        self._start = FloatEdit(0.0, self)
-        self._stop = FloatEdit(1.0, self)
+        self._start = SiFloatEdit(0.0, unit="V", parent=self)
+        self._stop = SiFloatEdit(1.0, unit="V", parent=self)
 
         self._points = QSpinBox(self)
         self._points.setRange(2, 99_999)
@@ -47,8 +53,8 @@ class SweepPanel(QGroupBox):
             self._integration.findData(IntegrationTime.MEDIUM)
         )
 
-        self._hold = FloatEdit(0.0, self)
-        self._delay = FloatEdit(0.0, self)
+        self._hold = SiFloatEdit(0.0, unit="s", parent=self)
+        self._delay = SiFloatEdit(0.0, unit="s", parent=self)
 
         form = QFormLayout(self)
         form.addRow("Start", self._start)
@@ -57,8 +63,8 @@ class SweepPanel(QGroupBox):
         form.addRow("Scale", self._scale)
         form.addRow("Direction", self._direction)
         form.addRow("Integration", self._integration)
-        form.addRow("Hold time (s)", self._hold)
-        form.addRow("Delay time (s)", self._delay)
+        form.addRow("Hold time", self._hold)
+        form.addRow("Delay time", self._delay)
 
     # -- public API ----------------------------------------------------------
 
@@ -95,6 +101,15 @@ class SweepPanel(QGroupBox):
             hold_time=self._hold.value(),
             delay_time=self._delay.value(),
         )
+
+    def set_var1_unit(self, unit: str) -> None:
+        """Change the unit suffix on the start/stop fields.
+
+        Hold / delay time fields stay in seconds — they are independent of
+        the VAR1 source mode.
+        """
+        self._start.set_unit(unit)
+        self._stop.set_unit(unit)
 
 
 __all__ = ["SweepPanel"]

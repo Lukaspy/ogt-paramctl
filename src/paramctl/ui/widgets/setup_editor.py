@@ -1,10 +1,10 @@
 """Combines the Channel and Sweep panels into one ``Setup`` editor.
 
-The editor never holds a fully-validated ``Setup`` of its own. Instead,
-:meth:`current_setup` is called on demand (e.g. when the user clicks Run);
-that call constructs a ``Setup`` from the panel state, which then runs
-through Pydantic validation. Validation errors propagate to the caller so
-the UI can surface them in the status bar.
+Coordinates the two panels:
+  - constructs a validated ``Setup`` on demand (``current_setup()``);
+  - propagates VAR1 unit changes from the channel panel into the sweep
+    panel so start/stop fields show V when VAR1 is V-sourcing and A when
+    VAR1 is I-sourcing.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import logging
 
 from PyQt6.QtWidgets import QFormLayout, QGroupBox, QLineEdit, QVBoxLayout, QWidget
 
+from ...models.channel import ChannelMode
 from ...models.setup import Setup
 from .channel_panel import ChannelPanel
 from .sweep_panel import SweepPanel
@@ -41,6 +42,9 @@ class SetupEditor(QWidget):
         layout.addWidget(self._sweep)
         layout.addStretch(1)
 
+        self._channels.channels_changed.connect(self._sync_var1_unit)
+        self._sync_var1_unit()
+
     def populate_from(self, setup: Setup) -> None:
         self._name_edit.setText(setup.name)
         self._channels.populate_from_setup(list(setup.channels))
@@ -59,6 +63,15 @@ class SetupEditor(QWidget):
             channels=self._channels.current_channels(),
             measurement=self._sweep.current_measurement(),
         )
+
+    def _sync_var1_unit(self) -> None:
+        """Push the VAR1 channel's unit into the sweep panel's start/stop fields."""
+        var1 = self._channels.find_var1_row()
+        if var1 is None:
+            self._sweep.set_var1_unit("")
+            return
+        unit = "V" if var1.mode is ChannelMode.V_SOURCE else "A"
+        self._sweep.set_var1_unit(unit)
 
 
 __all__ = ["SetupEditor"]

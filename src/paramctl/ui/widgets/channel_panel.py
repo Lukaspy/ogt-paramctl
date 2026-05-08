@@ -26,7 +26,7 @@ from ...models.channel import (
     ChannelId,
     ChannelMode,
 )
-from ._float_edit import FloatEdit
+from ._si_float_edit import SiFloatEdit
 
 logger = logging.getLogger(__name__)
 
@@ -37,21 +37,24 @@ _M0_CHANNELS: tuple[ChannelId, ...] = (
     ChannelId.SMU4,
 )
 
-_DEFAULT_COMPLIANCE_BY_MODE: dict[ChannelMode, float] = {
-    ChannelMode.V_SOURCE: 1e-3,   # 1 mA when sourcing voltage
-    ChannelMode.I_SOURCE: 10.0,   # 10 V when sourcing current
-}
+
+def _units_for_mode(mode: ChannelMode) -> tuple[str, str]:
+    """Return ``(source_unit, compliance_unit)`` for a channel mode.
+
+    V_SOURCE: source is volts, compliance is current (amps).
+    I_SOURCE: source is amps, compliance is voltage (volts).
+    Other modes: both fields are disabled, so their units do not matter —
+    return empty strings to avoid stale labels.
+    """
+    if mode is ChannelMode.V_SOURCE:
+        return "V", "A"
+    if mode is ChannelMode.I_SOURCE:
+        return "A", "V"
+    return "", ""
 
 
 class ChannelRow:
-    """Widgets for a single channel's row plus the to/from ``ChannelConfig`` glue.
-
-    Not a ``QWidget`` itself — it owns several widgets that the panel adds to
-    its grid layout. The panel calls :meth:`build_config` per row when
-    assembling the active ``Setup``.
-    """
-
-    changed = pyqtSignal()
+    """Widgets for a single channel's row plus the to/from ``ChannelConfig`` glue."""
 
     def __init__(self, channel_id: ChannelId, parent: QWidget) -> None:
         self.channel_id = channel_id
@@ -66,12 +69,13 @@ class ChannelRow:
         for fn in ChannelFunction:
             self.function_combo.addItem(fn.value, fn)
 
-        self.source_edit = FloatEdit(0.0, parent)
-        self.compliance_edit = FloatEdit(1e-3, parent)
+        self.source_edit = SiFloatEdit(0.0, unit="V", parent=parent)
+        self.compliance_edit = SiFloatEdit(1e-3, unit="A", parent=parent)
         self.label_edit = QLineEdit(parent)
         self.label_edit.setPlaceholderText("optional label")
 
-        self.mode_combo.currentIndexChanged.connect(self._sync_enabled_state)
+        self.mode_combo.currentIndexChanged.connect(self._sync_unit_state)
+        self._sync_unit_state()
 
     @property
     def enabled(self) -> bool:
@@ -89,10 +93,13 @@ class ChannelRow:
         assert isinstance(data, ChannelFunction)
         return data
 
-    def _sync_enabled_state(self) -> None:
+    def _sync_unit_state(self) -> None:
         is_source = self.mode in (ChannelMode.V_SOURCE, ChannelMode.I_SOURCE)
         self.source_edit.setEnabled(is_source)
         self.compliance_edit.setEnabled(is_source)
+        source_unit, compliance_unit = _units_for_mode(self.mode)
+        self.source_edit.set_unit(source_unit)
+        self.compliance_edit.set_unit(compliance_unit)
 
     def build_config(self) -> ChannelConfig | None:
         """Translate the row state to a ``ChannelConfig``, or ``None`` if disabled."""
@@ -113,7 +120,6 @@ class ChannelRow:
         )
 
     def populate_from(self, config: ChannelConfig | None) -> None:
-        """Push values from a ``ChannelConfig`` into the widgets."""
         if config is None:
             self.enable_check.setChecked(False)
             self.mode_combo.setCurrentIndex(
@@ -135,16 +141,25 @@ class ChannelRow:
             if config.compliance is not None:
                 self.compliance_edit.set_value(config.compliance)
             self.label_edit.setText(config.label)
-        self._sync_enabled_state()
+        self._sync_unit_state()
 
 
 class ChannelPanel(QGroupBox):
-    """Editor for the per-channel section of a ``Setup``."""
+    """Editor for the per-channel section of a ``Setup``.
+
+    Emits ``channels_changed`` whenever the *structural* state of any row
+    changes (enable / mode / function). Numeric edits do not fire it
+    because they do not affect downstream unit labels — only the structural
+    bits do.
+    """
+
+    channels_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Channels", parent)
         self._rows: dict[ChannelId, ChannelRow] = {}
         self._build_ui()
+        self._wire_change_signals()
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -177,12 +192,19 @@ class ChannelPanel(QGroupBox):
             grid.addWidget(row.label_edit, row_index, 6)
             self._rows[channel_id] = row
 
+    def _wire_change_signals(self) -> None:
+        for row in self._rows.values():
+            row.enable_check.stateChanged.connect(self.channels_changed)
+            row.mode_combo.currentIndexChanged.connect(self.channels_changed)
+            row.function_combo.currentIndexChanged.connect(self.channels_changed)
+
     # -- public API ----------------------------------------------------------
 
     def populate_from_setup(self, channels: list[ChannelConfig]) -> None:
         by_id: dict[ChannelId, ChannelConfig] = {c.channel_id: c for c in channels}
         for ch_id, row in self._rows.items():
             row.populate_from(by_id.get(ch_id))
+        self.channels_changed.emit()
 
     def current_channels(self) -> list[ChannelConfig]:
         out: list[ChannelConfig] = []
@@ -191,6 +213,13 @@ class ChannelPanel(QGroupBox):
             if cfg is not None:
                 out.append(cfg)
         return out
+
+    def find_var1_row(self) -> ChannelRow | None:
+        """The row currently configured as VAR1, if any (and enabled)."""
+        for row in self._rows.values():
+            if row.enabled and row.function is ChannelFunction.VAR1:
+                return row
+        return None
 
 
 __all__ = ["ChannelPanel", "ChannelRow"]
