@@ -1,19 +1,17 @@
-"""Top-level window for the M0 thin slice.
+"""Top-level window: setup editor on the left, multi-trace plot in the middle.
 
-Renders a fixed setup (passed in by the launcher), provides Run / Stop
-buttons, and shows samples on a live ``PlotView`` as they arrive. The
-window owns the worker QThread lifecycle but never touches the driver
-itself — that responsibility lives on the worker thread.
-
-This is intentionally minimal: no channel/sweep editor, no setup
-load/save, no menu bar. Those land in subsequent UI commits once the
-threading + plotting + abort flow is validated end-to-end.
+Run / Stop / Clear-traces sit on the toolbar at the top. Each click of Run
+reads the current editor state into a fresh ``Setup``, validates it through
+Pydantic (errors land in the status bar), and kicks off a new sweep on a
+worker thread. Previous traces stay on the plot, recoloured, until the user
+clicks Clear traces.
 """
 from __future__ import annotations
 
 import logging
 import threading
 
+from pydantic import ValidationError
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
@@ -21,6 +19,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
+    QSplitter,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -29,35 +29,33 @@ from PyQt6.QtWidgets import (
 from ..driver.base import AnalyzerDriver
 from ..models.results import Sample
 from ..models.setup import Setup
-from .widgets import PlotView
+from .widgets import PlotView, SetupEditor
 from .workers import SweepWorker
 
 logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Run / Stop a single sweep against the supplied driver and plot it."""
+    """Editor + plot + Run/Stop/Clear, wired to a single ``AnalyzerDriver``."""
 
-    # Public signals for tests and external listeners.
     sweep_completed = pyqtSignal(int, bool)
     sweep_failed = pyqtSignal(object, int)
 
     def __init__(
         self,
         driver: AnalyzerDriver,
-        setup: Setup,
+        initial_setup: Setup,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._driver = driver
-        self._setup = setup
-
         self._thread: QThread | None = None
         self._worker: SweepWorker | None = None
         self._abort_event: threading.Event | None = None
 
-        self.setWindowTitle(f"paramctl — {setup.name or 'untitled setup'}")
+        self.setWindowTitle("paramctl")
         self._build_ui()
+        self._editor.populate_from(initial_setup)
         self._wire_buttons()
 
     # --- UI assembly --------------------------------------------------------
@@ -66,41 +64,68 @@ class MainWindow(QMainWindow):
         self._run_btn = QPushButton("Run")
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
+        self._clear_btn = QPushButton("Clear traces")
         self._idn_label = QLabel(f"Driver: {type(self._driver).__name__}")
 
-        controls = QHBoxLayout()
-        controls.addWidget(self._run_btn)
-        controls.addWidget(self._stop_btn)
-        controls.addStretch()
-        controls.addWidget(self._idn_label)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(self._run_btn)
+        toolbar.addWidget(self._stop_btn)
+        toolbar.addWidget(self._clear_btn)
+        toolbar.addStretch()
+        toolbar.addWidget(self._idn_label)
+
+        self._editor = SetupEditor()
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidget(self._editor)
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setMinimumWidth(420)
 
         self._plot = PlotView()
-        self._plot.configure_for(self._setup)
+
+        splitter = QSplitter()
+        splitter.addWidget(editor_scroll)
+        splitter.addWidget(self._plot)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([460, 700])
 
         layout = QVBoxLayout()
-        layout.addLayout(controls)
-        layout.addWidget(self._plot, stretch=1)
+        layout.addLayout(toolbar)
+        layout.addWidget(splitter, stretch=1)
 
         central = QWidget()
         central.setLayout(layout)
         self.setCentralWidget(central)
+
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
 
     def _wire_buttons(self) -> None:
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
+        self._clear_btn.clicked.connect(self._on_clear)
 
-    # --- run / stop ---------------------------------------------------------
+    # --- run / stop / clear -------------------------------------------------
 
     def _on_run(self) -> None:
         if self._thread is not None:
             logger.warning("MainWindow: run requested while a sweep is already active")
             return
 
-        self._plot.clear_curves()
+        try:
+            setup = self._editor.current_setup()
+        except ValidationError as exc:
+            first = exc.errors()[0]
+            location = ".".join(str(p) for p in first.get("loc", ()))
+            self._status_bar.showMessage(
+                f"Setup invalid: {location}: {first.get('msg', exc)}", 10000
+            )
+            logger.warning("MainWindow: invalid setup: %s", exc)
+            return
+
+        self._plot.begin_run(setup)
         self._abort_event = threading.Event()
-        worker = SweepWorker(self._driver, self._setup, self._abort_event)
+        worker = SweepWorker(self._driver, setup, self._abort_event)
         thread = QThread(self)
         worker.moveToThread(thread)
 
@@ -116,7 +141,7 @@ class MainWindow(QMainWindow):
         self._thread = thread
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        self._status_bar.showMessage("Starting…")
+        self._status_bar.showMessage(f"Starting {setup.name or 'untitled setup'}…")
         thread.start()
 
     def _on_stop(self) -> None:
@@ -124,9 +149,19 @@ class MainWindow(QMainWindow):
             return
         self._status_bar.showMessage("Aborting…")
         self._abort_event.set()
-        # Calling abort() from the GUI thread interrupts a blocking VISA read
-        # inside the worker (CLAUDE.md §189: abort within ~1 second).
         self._driver.abort()
+
+    def _on_clear(self) -> None:
+        if self._thread is not None:
+            # Refuse to clear while a run is in flight: the active curve is
+            # still being populated and removing it would leave the worker
+            # writing into a deleted item.
+            self._status_bar.showMessage(
+                "Cannot clear traces while a sweep is running.", 5000
+            )
+            return
+        self._plot.clear_history()
+        self._status_bar.showMessage("Traces cleared.", 3000)
 
     # --- worker → ui slots --------------------------------------------------
 
@@ -163,7 +198,6 @@ class MainWindow(QMainWindow):
     # --- close handling -----------------------------------------------------
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
-        # Make sure no worker is left running on close.
         if self._abort_event is not None:
             self._abort_event.set()
         if self._thread is not None:

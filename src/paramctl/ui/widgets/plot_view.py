@@ -1,131 +1,198 @@
-"""Live measurement plot built on pyqtgraph.
+"""Multi-trace measurement plot built on pyqtgraph.
 
-Renders one curve per measured channel. Samples accumulate as they arrive;
-``reset()`` clears the curves and starts a new run. The widget is dumb —
-it knows nothing about drivers, engines, or threads. The MainWindow feeds
-it ``Sample`` instances via signal-slot connections.
+Each completed run leaves its curves on the plot, recoloured and dimmed so
+the active trace is visually distinct. Useful workflow: tweak a parameter,
+run, compare against the previous trace; older traces stay visible until
+you call ``clear_history()``.
+
+The widget is dumb — it knows nothing about drivers, engines, or threads.
+The MainWindow feeds it ``Sample`` instances via signal-slot connections
+and calls ``begin_run(setup)`` immediately before each run.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass, field
 
 import pyqtgraph as pg
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
-from ...models.channel import ChannelConfig, ChannelFunction, ChannelMode
+from ...models.channel import ChannelConfig, ChannelFunction, ChannelId, ChannelMode
 from ...models.results import Sample
 from ...models.setup import Setup
 
 logger = logging.getLogger(__name__)
 
 
-_CURVE_COLOURS = ["y", "c", "m", "g", "r", "w"]
+# Bright primary colour used for the active (in-progress / most-recent) trace.
+_ACTIVE_COLOUR = QColor("yellow")
+_ACTIVE_LINE_WIDTH = 2
+
+# Cycled palette for historical traces. Each completed run picks the next
+# colour; the alpha is then shaped by age in ``_recolour_history``.
+_HISTORY_HUES: tuple[QColor, ...] = (
+    QColor(255, 140, 0),    # orange
+    QColor(0, 200, 255),    # azure
+    QColor(255, 80, 200),   # pink
+    QColor(120, 255, 80),   # lime
+    QColor(180, 130, 255),  # violet
+    QColor(255, 220, 80),   # gold
+)
+_HISTORY_LINE_WIDTH = 1
+# Oldest trace fades down to this alpha. Newer traces interpolate up to
+# the full-strength _HISTORY_ALPHA_MAX.
+_HISTORY_ALPHA_MIN = 60
+_HISTORY_ALPHA_MAX = 200
+
+
+@dataclass
+class _TraceRun:
+    """One completed-or-active run's curves on the plot."""
+
+    setup: Setup
+    curves: dict[ChannelId, pg.PlotDataItem] = field(default_factory=dict)
+    x: list[float] = field(default_factory=list)
+    y_by_channel: dict[ChannelId, list[float]] = field(default_factory=dict)
 
 
 class PlotView(QWidget):
-    """Plots ``Sample`` data live as it arrives from the engine.
-
-    Each non-VAR1 channel listed in the active ``Setup`` gets its own curve;
-    the X axis is the VAR1 source value, the Y axis is the channel reading
-    (current when V-sourcing, voltage when I-sourcing). For M0, all measured
-    channels share an axis — multi-axis plotting is a follow-up.
-    """
+    """Plots ``Sample`` data live with multi-run history."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._plot = pg.PlotWidget()
         self._plot.setBackground("k")
         self._plot.showGrid(x=True, y=True, alpha=0.3)
-        self._plot.addLegend()
-        self._plot.setLabel("bottom", "VAR1", units="V")
-        self._plot.setLabel("left", "I", units="A")
+        self._legend = self._plot.addLegend()
+        self._plot.setLabel("bottom", "VAR1")
+        self._plot.setLabel("left", "Reading")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._plot)
 
-        self._curves: dict[Any, pg.PlotDataItem] = {}
-        self._x: list[float] = []
-        self._y: dict[Any, list[float]] = {}
-        self._var1_label: str | None = None
+        self._history: list[_TraceRun] = []
+        self._active: _TraceRun | None = None
+        self._run_counter = 0
 
-    def configure_for(self, setup: Setup) -> None:
-        """Tear down existing curves and create one per measured channel.
+    # -- run lifecycle -------------------------------------------------------
 
-        Call this immediately before a new run so the plot reflects the
-        setup's channel layout.
-        """
-        self._plot.clear()
-        # ``clear()`` removes the legend item; rebuild.
-        self._plot.addLegend()
-        self._curves = {}
-        self._x = []
-        self._y = {}
+    def begin_run(self, setup: Setup) -> None:
+        """Demote the previous active run to history; create new active curves."""
+        if self._active is not None:
+            self._history.append(self._active)
+            self._active = None
+        self._recolour_history()
 
-        var1 = self._var1(setup)
-        self._var1_label = self._axis_label(var1, axis="bottom")
-        self._plot.setLabel("bottom", self._var1_label)
+        self._run_counter += 1
+        run = _TraceRun(setup=setup)
+        self._configure_axes(setup)
 
-        plotted_any = False
-        for index, channel in enumerate(_measured_channels(setup)):
-            colour = _CURVE_COLOURS[index % len(_CURVE_COLOURS)]
-            label = channel.label or channel.channel_id.value
+        for channel in _measured_channels(setup):
+            label = self._format_label(channel, run_number=self._run_counter)
             curve = self._plot.plot(
-                pen=pg.mkPen(colour, width=2), name=label, symbol="o", symbolSize=4
+                pen=pg.mkPen(_ACTIVE_COLOUR, width=_ACTIVE_LINE_WIDTH),
+                name=label,
+                symbol="o",
+                symbolSize=4,
+                symbolBrush=_ACTIVE_COLOUR,
+                symbolPen=_ACTIVE_COLOUR,
             )
-            self._curves[channel.channel_id] = curve
-            self._y[channel.channel_id] = []
-            plotted_any = True
+            run.curves[channel.channel_id] = curve
+            run.y_by_channel[channel.channel_id] = []
 
-        if plotted_any:
-            sample_unit = "A" if any(
-                c.mode is ChannelMode.V_SOURCE for c in setup.channels
-            ) else "V"
-            self._plot.setLabel("left", "Reading", units=sample_unit)
+        self._active = run
 
     def add_sample(self, sample: Sample) -> None:
-        """Append a sample's readings to each configured curve."""
+        if self._active is None:
+            return
         if sample.var1_value is None:
             return
-        self._x.append(sample.var1_value)
-        for channel_id, curve in self._curves.items():
+        self._active.x.append(sample.var1_value)
+        for channel_id, curve in self._active.curves.items():
             value = sample.readings.get(channel_id)
             if value is None:
                 continue
-            self._y[channel_id].append(value)
-            # Curves can have fewer Y points than X if a channel goes missing.
-            xs = self._x[: len(self._y[channel_id])]
-            curve.setData(xs, self._y[channel_id])
+            self._active.y_by_channel[channel_id].append(value)
+            xs = self._active.x[: len(self._active.y_by_channel[channel_id])]
+            curve.setData(xs, self._active.y_by_channel[channel_id])
 
-    def clear_curves(self) -> None:
-        """Empty all curves but keep their definitions in place."""
-        self._x = []
-        for ch_id in self._y:
-            self._y[ch_id] = []
-        for curve in self._curves.values():
-            curve.setData([], [])
+    def clear_history(self) -> None:
+        """Remove every run from the plot, including the active one."""
+        for run in self._history:
+            for curve in run.curves.values():
+                self._plot.removeItem(curve)
+        if self._active is not None:
+            for curve in self._active.curves.values():
+                self._plot.removeItem(curve)
+        self._history = []
+        self._active = None
+        self._run_counter = 0
 
-    @staticmethod
-    def _var1(setup: Setup) -> ChannelConfig:
-        return next(
-            c for c in setup.channels if c.function is ChannelFunction.VAR1
+    # -- styling -------------------------------------------------------------
+
+    def _configure_axes(self, setup: Setup) -> None:
+        var1 = next(c for c in setup.channels if c.function is ChannelFunction.VAR1)
+        x_unit = "V" if var1.mode is ChannelMode.V_SOURCE else "A"
+        self._plot.setLabel(
+            "bottom", var1.label or var1.channel_id.value, units=x_unit
         )
 
+        # Y axis follows the VAR1 mode: V-source measures current, I-source
+        # measures voltage. Until multi-channel measurement lands, this stays
+        # tied to the VAR1 channel.
+        y_unit = "A" if var1.mode is ChannelMode.V_SOURCE else "V"
+        self._plot.setLabel("left", "Reading", units=y_unit)
+
+    def _recolour_history(self) -> None:
+        """Walk historical curves and reapply colour + alpha based on age.
+
+        Most-recent history runs get the brightest historical colour; older
+        runs fade towards _HISTORY_ALPHA_MIN.
+        """
+        if not self._history:
+            return
+        n = len(self._history)
+        for index, run in enumerate(self._history):
+            age_factor = (index + 1) / n  # newest history -> 1.0, oldest -> 1/n
+            alpha = int(
+                _HISTORY_ALPHA_MIN
+                + (_HISTORY_ALPHA_MAX - _HISTORY_ALPHA_MIN) * age_factor
+            )
+            base_colour = _HISTORY_HUES[index % len(_HISTORY_HUES)]
+            colour = QColor(
+                base_colour.red(),
+                base_colour.green(),
+                base_colour.blue(),
+                alpha,
+            )
+            for curve in run.curves.values():
+                pen = pg.mkPen(colour, width=_HISTORY_LINE_WIDTH)
+                curve.setPen(pen)
+                curve.setSymbol(None)
+
     @staticmethod
-    def _axis_label(channel: ChannelConfig, *, axis: str) -> str:
-        del axis
-        unit = "V" if channel.mode is ChannelMode.V_SOURCE else "A"
-        name = channel.label or channel.channel_id.value
-        return f"{name} ({unit})"
+    def _format_label(channel: ChannelConfig, *, run_number: int) -> str:
+        base = channel.label or channel.channel_id.value
+        return f"#{run_number} {base}"
+
+    # -- testing affordances -------------------------------------------------
+
+    @property
+    def active_run(self) -> _TraceRun | None:
+        return self._active
+
+    @property
+    def history(self) -> list[_TraceRun]:
+        return list(self._history)
 
 
 def _measured_channels(setup: Setup) -> list[ChannelConfig]:
-    """Channels we plot a curve for — currently the VAR1 channel only.
+    """Channels we plot a curve for. Currently the VAR1 channel only.
 
-    The driver layer presently only requests measurement on the VAR1
-    channel (``MM 2,<var1>``); when multi-channel measurement lands, this
-    function expands to include companion measurement channels.
+    Expand to include companion measurement channels once FlexDriver issues
+    multi-channel ``MM`` commands.
     """
     return [c for c in setup.channels if c.function is ChannelFunction.VAR1]
 

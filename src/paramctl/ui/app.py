@@ -109,9 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Failed to connect: {exc}", file=sys.stderr)
         return 2
 
-    setup = _default_setup()
-    window = MainWindow(driver, setup)
-    window.resize(900, 600)
+    window = MainWindow(driver, _default_setup())
+    window.resize(1200, 700)
     window.show()
 
     try:
