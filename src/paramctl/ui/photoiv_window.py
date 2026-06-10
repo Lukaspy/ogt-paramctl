@@ -16,7 +16,7 @@ import logging
 import threading
 
 from pydantic import ValidationError
-from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QThread, QTimer
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..driver import FlexDriver, MockDriver, list_resources
+from ..driver import FlexDriver, MockDriver
 from ..driver.base import AnalyzerDriver
 from ..light.base import LightSource
 from ..light.mock import DEFAULT_WAVELENGTHS_NM, MockLightSource
@@ -51,7 +51,7 @@ from ..models.illumination import IlluminationSequence
 from ..models.measurement import SweepRange
 from ..models.results import Sample
 from ..models.setup import Setup
-from .photoiv_workers import CampaignWorker, ConnectWorker
+from .photoiv_workers import CampaignWorker, ConnectWorker, DiscoveryWorker
 from .widgets import PlotView, SetupEditor
 
 logger = logging.getLogger(__name__)
@@ -80,9 +80,12 @@ class PhotoIvWindow(QMainWindow):
     The analyzer and the light source are chosen inside the window (CLI flags
     only pre-fill the fields, mirroring ``mfia-cf``). The analyzer connects
     via an explicit Connect button — its ``*IDN?`` is shown before any run —
-    on a worker thread, since VISA must never run on the Qt main thread. The
-    light source is constructed fresh at Run time; its connect/disconnect
-    lifecycle is owned per-campaign by the engine.
+    on a worker thread, since VISA must never run on the Qt main thread.
+    Resource discovery is a VISA operation too (pyvisa-py can block for
+    seconds probing GPIB minors and TCPIP), so Refresh runs on its own worker
+    thread as well; ``discover_on_start`` queues one refresh once the event
+    loop is up. The light source is constructed fresh at Run time; its
+    connect/disconnect lifecycle is owned per-campaign by the engine.
     """
 
     def __init__(
@@ -95,6 +98,7 @@ class PhotoIvWindow(QMainWindow):
         led_bitfile: str | None = None,
         led_resource: str = "RIO0",
         led_use_cal: bool = False,
+        discover_on_start: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -103,6 +107,8 @@ class PhotoIvWindow(QMainWindow):
         self._worker: CampaignWorker | None = None
         self._conn_thread: QThread | None = None
         self._conn_worker: ConnectWorker | None = None
+        self._disc_thread: QThread | None = None
+        self._disc_worker: DiscoveryWorker | None = None
         self._abort_event: threading.Event | None = None
         self._sequence: IlluminationSequence | None = None
         self._campaign: PhotoIvCampaign | None = None
@@ -120,6 +126,8 @@ class PhotoIvWindow(QMainWindow):
             led_resource=led_resource,
             led_use_cal=led_use_cal,
         )
+        if discover_on_start:
+            QTimer.singleShot(0, self._on_refresh_resources)
 
     def _apply_prefills(
         self,
@@ -212,18 +220,18 @@ class PhotoIvWindow(QMainWindow):
         form = QFormLayout(box)
 
         # Analyzer: editable so a resource string can be typed directly;
-        # Refresh queries VISA discovery on demand (not at startup — it can
-        # be slow with no backend installed).
+        # Refresh runs VISA discovery on a worker thread (it can block for
+        # seconds) and repopulates the dropdown when it returns.
         self._resource_combo = QComboBox()
         self._resource_combo.setEditable(True)
         self._resource_combo.addItem(_MOCK_ANALYZER)
-        refresh_btn = QPushButton("Refresh")
-        refresh_btn.clicked.connect(self._on_refresh_resources)
+        self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.clicked.connect(self._on_refresh_resources)
         self._connect_btn = QPushButton("Connect")
         self._connect_btn.clicked.connect(self._on_connect)
         analyzer_row = QHBoxLayout()
         analyzer_row.addWidget(self._resource_combo, stretch=1)
-        analyzer_row.addWidget(refresh_btn)
+        analyzer_row.addWidget(self._refresh_btn)
         analyzer_row.addWidget(self._connect_btn)
         analyzer_holder = QWidget()
         analyzer_holder.setLayout(analyzer_row)
@@ -267,12 +275,26 @@ class PhotoIvWindow(QMainWindow):
         return box
 
     def _on_refresh_resources(self) -> None:
+        if self._disc_thread is not None:
+            return  # a discovery is already in flight
+
+        self._refresh_btn.setEnabled(False)
+        self._status_bar.showMessage("Discovering VISA resources…")
+
+        worker = DiscoveryWorker()
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_discovery_done)
+        worker.failed.connect(self._on_discovery_failed)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._cleanup_disc_thread)
+        self._disc_worker = worker
+        self._disc_thread = thread
+        thread.start()
+
+    def _on_discovery_done(self, resources: list[str]) -> None:
         current = self._resource_combo.currentText()
-        try:
-            resources = list_resources()
-        except Exception as exc:
-            self._status_bar.showMessage(f"VISA discovery failed: {exc}", 8000)
-            return
         self._resource_combo.clear()
         self._resource_combo.addItem(_MOCK_ANALYZER)
         for r in resources:
@@ -282,6 +304,18 @@ class PhotoIvWindow(QMainWindow):
         self._status_bar.showMessage(
             f"Found {len(resources)} VISA resource(s).", 5000
         )
+
+    def _on_discovery_failed(self, exc: BaseException) -> None:
+        self._status_bar.showMessage(f"VISA discovery failed: {exc}", 8000)
+
+    def _cleanup_disc_thread(self) -> None:
+        if self._disc_worker is not None:
+            self._disc_worker.deleteLater()
+        if self._disc_thread is not None:
+            self._disc_thread.deleteLater()
+        self._disc_worker = None
+        self._disc_thread = None
+        self._refresh_btn.setEnabled(True)
 
     def _on_browse_bitfile(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
@@ -742,6 +776,9 @@ class PhotoIvWindow(QMainWindow):
         if self._conn_thread is not None:
             self._conn_thread.quit()
             self._conn_thread.wait(2000)
+        if self._disc_thread is not None:
+            self._disc_thread.quit()
+            self._disc_thread.wait(2000)
         # The window owns the analyzer connection now that selection is in-GUI.
         if self._driver is not None:
             try:

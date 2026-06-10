@@ -100,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         led_bitfile=args.led_bitfile,
         led_resource=args.led_resource,
         led_use_cal=args.led_use_cal,
+        # Discover VISA resources once at startup (on a worker thread) so the
+        # dropdown is populated without a Refresh click. Pointless with the
+        # mocks pre-connected, so --mock launches stay fully offline.
+        discover_on_start=not args.mock,
     )
     window.resize(1280, 820)
     window.show()

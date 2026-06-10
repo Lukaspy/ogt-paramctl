@@ -161,3 +161,53 @@ def test_run_without_sequence_is_rejected(qtbot) -> None:
     win = _mock_window(qtbot)
     win._on_run()  # no sequence generated yet
     assert win._thread is None
+
+
+def _combo_items(win: PhotoIvWindow) -> list[str]:
+    return [win._resource_combo.itemText(i) for i in range(win._resource_combo.count())]
+
+
+def test_refresh_discovers_off_thread_and_keeps_selection(qtbot, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "paramctl.ui.photoiv_workers.list_resources",
+        lambda: ["GPIB0::15::INSTR", "GPIB0::INTFC"],
+    )
+    win = PhotoIvWindow(_setup())
+    qtbot.addWidget(win)
+    win._resource_combo.setCurrentText("GPIB0::15::INSTR")  # typed by hand
+
+    win._on_refresh_resources()
+    assert not win._refresh_btn.isEnabled()  # busy while discovery is in flight
+    qtbot.waitUntil(lambda: win._disc_thread is None, timeout=5000)
+
+    assert _combo_items(win) == ["Mock analyzer", "GPIB0::15::INSTR", "GPIB0::INTFC"]
+    assert win._resource_combo.currentText() == "GPIB0::15::INSTR"  # preserved
+    assert win._refresh_btn.isEnabled()
+
+
+def test_refresh_failure_reports_and_reenables(qtbot, monkeypatch) -> None:
+    def _boom() -> list[str]:
+        raise OSError("no VISA backend")
+
+    monkeypatch.setattr("paramctl.ui.photoiv_workers.list_resources", _boom)
+    win = PhotoIvWindow(_setup())
+    qtbot.addWidget(win)
+
+    win._on_refresh_resources()
+    qtbot.waitUntil(lambda: win._disc_thread is None, timeout=5000)
+
+    assert "VISA discovery failed" in win._status_bar.currentMessage()
+    assert _combo_items(win) == ["Mock analyzer"]  # untouched on failure
+    assert win._refresh_btn.isEnabled()
+
+
+def test_discover_on_start_populates_without_a_click(qtbot, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "paramctl.ui.photoiv_workers.list_resources", lambda: ["GPIB0::15::INSTR"]
+    )
+    win = PhotoIvWindow(_setup(), discover_on_start=True)
+    qtbot.addWidget(win)
+    qtbot.waitUntil(
+        lambda: "GPIB0::15::INSTR" in _combo_items(win), timeout=5000
+    )
+    assert win._resource_combo.currentText() == "Mock analyzer"  # selection kept

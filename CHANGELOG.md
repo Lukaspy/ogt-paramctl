@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Photo-IV window: VISA resource discovery (the Refresh button) ran on the Qt main thread, freezing the GUI for ~8 s while pyvisa-py probed every `/dev/gpib*` minor and scanned TCPIP — easily mistaken for discovery not working. It now runs on a worker thread (`DiscoveryWorker`), with a "Discovering VISA resources…" status message and the Refresh button disabled while in flight.
+- Photo-IV window: the resource dropdown started with only "Mock analyzer" until Refresh was clicked. `paramctl-photoiv` now triggers one background discovery at startup (skipped for `--mock` launches, which stay fully offline).
+
 ### Added
 - Initial repository scaffold: `pyproject.toml` (hatchling build, pinned dependencies, ruff/mypy/pytest configuration), `README.md`, `.gitignore`, `LICENSE` (GPL-3.0-or-later), `CLAUDE.md` project guidance, and an empty `src/paramctl/__init__.py`.
 - `CHANGELOG.md` (this file).

@@ -16,6 +16,7 @@ import threading
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
+from ..driver import list_resources
 from ..driver.base import AnalyzerDriver
 from ..engine import (
     CampaignCompleted,
@@ -174,4 +175,33 @@ class ConnectWorker(QObject):
             self.finished.emit()
 
 
-__all__ = ["CampaignWorker", "ConnectWorker"]
+class DiscoveryWorker(QObject):
+    """Enumerates VISA resources off the GUI thread.
+
+    ``pyvisa-py`` discovery probes every GPIB minor device and scans TCPIP
+    interfaces, which can block for many seconds — far too long for the Qt
+    main thread, and a VISA operation besides (CLAUDE.md threading rules).
+
+    Signals:
+        done(list): discovered resource strings (may be empty).
+        failed(object): the exception, if discovery raised.
+        finished(): emitted unconditionally last.
+    """
+
+    done = pyqtSignal(list)
+    failed = pyqtSignal(object)
+    finished = pyqtSignal()
+
+    def run(self) -> None:
+        try:
+            resources = list_resources()
+        except Exception as exc:
+            logger.exception("DiscoveryWorker: discovery failed")
+            self.failed.emit(exc)
+        else:
+            self.done.emit(resources)
+        finally:
+            self.finished.emit()
+
+
+__all__ = ["CampaignWorker", "ConnectWorker", "DiscoveryWorker"]
