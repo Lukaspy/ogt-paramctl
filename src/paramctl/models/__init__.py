@@ -6,6 +6,7 @@ makes sense for the 4155/4156, it does not belong here.
 """
 from __future__ import annotations
 
+from .campaign import PhotoIvCampaign
 from .channel import (
     ChannelConfig,
     ChannelFunction,
@@ -16,6 +17,7 @@ from .channel import (
     is_vmu,
     is_vsu,
 )
+from .illumination import IlluminationSequence, IlluminationStep
 from .measurement import (
     IntegrationTime,
     MeasurementMode,
@@ -37,9 +39,12 @@ __all__ = [
     "ChannelId",
     "ChannelLimits",
     "ChannelMode",
+    "IlluminationSequence",
+    "IlluminationStep",
     "IntegrationTime",
     "MeasurementMode",
     "MeasurementResult",
+    "PhotoIvCampaign",
     "Sample",
     "SamplingMeasurement",
     "SpotMeasurement",

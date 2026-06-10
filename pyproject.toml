@@ -56,6 +56,10 @@ dev = [
     "mypy==1.11.2",
 ]
 
+[project.scripts]
+paramctl = "paramctl.ui.app:main"
+paramctl-photoiv = "paramctl.ui.photoiv_app:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/paramctl"]
 
@@ -105,6 +109,7 @@ module = [
     "pyvisa_py.*",
     "pyqtgraph.*",
     "matplotlib.*",
+    "led_driver.*",
 ]
 ignore_missing_imports = true
 

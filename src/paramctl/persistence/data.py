@@ -52,16 +52,34 @@ def write_run_csv(
     path: Path | str,
     setup: Setup,
     samples: list[Sample],
+    extra_metadata: dict[str, str] | None = None,
 ) -> None:
-    """Write a measurement run to ``path`` as comment-prefixed CSV."""
-    Path(path).write_text(dump_run_csv(setup, samples))
+    """Write a measurement run to ``path`` as comment-prefixed CSV.
+
+    Args:
+        path: Destination file.
+        setup: The setup that produced the run; embedded verbatim.
+        samples: Captured samples, in acquisition order.
+        extra_metadata: Optional ``key: value`` pairs written as ``#``
+            comment lines just below the export header (before the embedded
+            setup block). Used by the photo-IV campaign to record the
+            illumination state. Purely informational -- the reader ignores
+            these lines, so output stays backward compatible.
+    """
+    Path(path).write_text(dump_run_csv(setup, samples, extra_metadata))
 
 
-def dump_run_csv(setup: Setup, samples: list[Sample]) -> str:
+def dump_run_csv(
+    setup: Setup,
+    samples: list[Sample],
+    extra_metadata: dict[str, str] | None = None,
+) -> str:
     """Render the same payload as :func:`write_run_csv` to a string."""
     buf = io.StringIO()
     buf.write("# paramctl trace export\n")
     buf.write(f"# exported_at: {_now_iso()}\n")
+    for key, value in (extra_metadata or {}).items():
+        buf.write(f"# {key}: {value}\n")
     buf.write(f"{_SETUP_BEGIN}\n")
     for line in dump_setup_yaml(setup).splitlines():
         buf.write(f"# {line}\n")
