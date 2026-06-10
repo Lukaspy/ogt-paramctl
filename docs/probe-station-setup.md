@@ -39,18 +39,73 @@ Verify with the mock backend (no hardware needed):
 paramctl-photoiv --mock
 ```
 
-## 4. VISA backend for the 4155
+## 4. GPIB-over-USB backend for the 4155 (Ubuntu)
 
-- `pyvisa-py` (pure Python) is installed automatically — enough for the Xyphro
-  USBTMC adapter with no extra software.
-- **NI USB-GPIB-HS on Linux:** install `linux-gpib` (kernel module + userspace)
-  and its Python bindings. On Windows/macOS install **NI-488.2 / NI-VISA**.
-- Find your instrument's resource string:
+`pyvisa-py` (pure Python) is installed automatically. What else you need depends
+on the adapter. First, identify it:
 
-  ```bash
-  python -c "import pyvisa; print(pyvisa.ResourceManager().list_resources())"
-  # e.g. ('GPIB0::17::INSTR',)
-  ```
+```bash
+lsusb | grep -iE "national instruments|gpib|3923"
+# "National Instruments" / ID 3923:... -> NI USB-GPIB-HS  (route B)
+# a USBTMC device                       -> XyphroLabs UsbGpib V2 (route A)
+```
+
+### A) XyphroLabs UsbGpib V2 — simplest, no GPIB driver
+It enumerates as a USBTMC device; `pyvisa-py` talks to it over USB.
+
+```bash
+sudo apt update && sudo apt install -y libusb-1.0-0
+pip install pyusb            # in the project venv; pyvisa-py uses it for USB
+```
+
+Permissions so you don't need `sudo` (use the VID from `lsusb`):
+
+```bash
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="04d8", MODE="0666"' | \
+  sudo tee /etc/udev/rules.d/99-usbtmc.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger   # then replug
+```
+
+### B) NI USB-GPIB-HS — `linux-gpib` (open source)
+
+```bash
+sudo apt install -y build-essential linux-headers-$(uname -r) \
+    libncurses-dev tk-dev autoconf libtool flex bison
+```
+
+Download `linux-gpib-kernel` + `linux-gpib-user` from
+<https://sourceforge.net/projects/linux-gpib/>, then build & install both:
+
+```bash
+cd linux-gpib-kernel-*  && make && sudo make install && sudo depmod -a
+cd ../linux-gpib-user-* && ./bootstrap && ./configure && make && sudo make install && sudo ldconfig
+```
+
+Configure `/etc/gpib.conf` with `board_type "ni_usb_b"`, then bring it up
+(this uploads the adapter firmware via `fxload`):
+
+```bash
+sudo modprobe ni_usb_gpib
+sudo gpib_config
+sudo usermod -aG gpib "$USER"      # device access without sudo; re-login after
+pip install gpib-ctypes            # so pyvisa-py can use linux-gpib
+```
+
+> Alternative for an NI adapter: if your Ubuntu is an NI-supported LTS, install
+> NI-488.2 + NI-VISA from NI's apt repo instead of building linux-gpib; PyVISA
+> then uses the NI backend automatically (drop the `'@py'` below). Often less
+> fiddly, but only on NI-supported releases.
+
+### Confirm and find the resource string
+
+```bash
+python -c "import pyvisa; rm=pyvisa.ResourceManager('@py'); \
+  r=rm.list_resources(); print(r); print(rm.open_resource(r[0]).query('*IDN?'))"
+# NI:      ('GPIB0::17::INSTR',)    — 17 is the 4155's front-panel GPIB address
+# Xyphro:  ('USB0::0x....::INSTR',)
+```
+
+Pass that string to the launcher, e.g. `--resource 'GPIB0::17::INSTR'`.
 
 ## 5. LED source (real hardware only)
 
