@@ -88,9 +88,21 @@ def _build_driver(args: argparse.Namespace) -> AnalyzerDriver | None:
     return FlexDriver(resource)
 
 
-def _build_light(args: argparse.Namespace) -> LightSource:
+def _build_light(args: argparse.Namespace) -> LightSource | None:
     if args.mock or args.led_mock:
         return MockLightSource()
+    if args.led_bitfile is None:
+        # led_driver silently runs its own mock backend when no bitfile is
+        # given — on a real analyzer that means a full "illuminated" campaign
+        # measured entirely in the dark. Refuse instead of failing silently.
+        print(
+            "No light source specified: pass --led-bitfile /path/to/led.lvbitx "
+            "for the real PXI LED source, or --led-mock to run without light.\n"
+            "(The bitfile lives in the PXI-AWG repo, e.g. "
+            "leddriverfpga_FPGATarget_LEDDriverFPGA_*.lvbitx.)",
+            file=sys.stderr,
+        )
+        return None
     return PxiLightSource(
         bitfile=args.led_bitfile,
         resource=args.led_resource,
@@ -135,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     if driver is None:
         return 1
     light = _build_light(args)
+    if light is None:
+        return 1
 
     try:
         driver.connect()

@@ -114,6 +114,28 @@ def test_series_dual_polarity_writes_two_curves_per_step(qtbot, driver, tmp_path
     assert markers == ["✓", "✓", "✓", "✓"]
 
 
+def test_reverse_order_generates_ir_first(qtbot, driver) -> None:
+    win = PhotoIvWindow(driver, MockLightSource(), _setup())
+    qtbot.addWidget(win)
+
+    win._wl_checks[385.0].setChecked(True)
+    win._wl_checks[850.0].setChecked(True)
+    win._intensity_edit.setText("100")
+    win._reverse_check.setChecked(True)
+    win._on_generate_sequence()
+
+    assert win._sequence is not None
+    lit = [s.wavelength_nm for s in win._sequence.steps if not s.is_dark]
+    assert lit == [850.0, 385.0]
+
+    # And unchecked -> ascending (UV first), the previous default.
+    win._reverse_check.setChecked(False)
+    win._on_generate_sequence()
+    assert win._sequence is not None
+    lit = [s.wavelength_nm for s in win._sequence.steps if not s.is_dark]
+    assert lit == [385.0, 850.0]
+
+
 def test_run_without_sequence_is_rejected(qtbot, driver, tmp_path: Path) -> None:
     win = PhotoIvWindow(driver, MockLightSource(), _setup())
     qtbot.addWidget(win)

@@ -100,9 +100,15 @@ class PhotoIvWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear plot")
         self._log_y_check = QCheckBox("Log Y")
+        # idn() works pre-connect on both sources and names the actual mode
+        # (e.g. "PXI-7853R ... (mock)" vs "(FPGA RIO0)") — the class name alone
+        # would hide a silently-mocked light source.
+        try:
+            light_idn = self._light.idn()
+        except Exception:
+            light_idn = type(self._light).__name__
         self._idn_label = QLabel(
-            f"Analyzer: {type(self._driver).__name__}   "
-            f"LED: {type(self._light).__name__}"
+            f"Analyzer: {type(self._driver).__name__}   LED: {light_idn}"
         )
 
         toolbar = QHBoxLayout()
@@ -201,6 +207,9 @@ class PhotoIvWindow(QMainWindow):
         wl_widget = QWidget()
         wl_widget.setLayout(wl_row)
         outer.addWidget(wl_widget)
+
+        self._reverse_check = QCheckBox("Reverse order (IR first: 850 nm → 385 nm)")
+        outer.addWidget(self._reverse_check)
 
         form = QFormLayout()
         self._intensity_edit = QLineEdit("1, 3, 10, 30, 100")
@@ -310,10 +319,11 @@ class PhotoIvWindow(QMainWindow):
             self._status_bar.showMessage("Enter at least one intensity percent.", 6000)
             return
 
+        ordered = sorted(wavelengths, reverse=self._reverse_check.isChecked())
         try:
             if self._mode_combo.currentData() == "series":
                 sequence = IlluminationSequence.intensity_series_per_wavelength(
-                    sorted(wavelengths),
+                    ordered,
                     intensities,
                     dark_settle_s=self._dark_settle.value(),
                     light_settle_s=self._light_settle.value(),
@@ -323,7 +333,7 @@ class PhotoIvWindow(QMainWindow):
                 )
             else:
                 sequence = IlluminationSequence.wavelength_intensity_matrix(
-                    sorted(wavelengths),
+                    ordered,
                     intensities,
                     interleave_dark=self._interleave_check.isChecked(),
                     light_settle_s=self._light_settle.value(),

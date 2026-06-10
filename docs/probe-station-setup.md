@@ -121,6 +121,13 @@ Also required on the LED machine: the NI-RIO / `nifpga` runtime, the compiled
 `~/.config/led_driver/config.json` (copy it from the lab machine — it pins the
 850=Ch0 … 385=Ch7 wiring and the 590 nm 700 mA limit).
 
+The bitfile ships in the PXI-AWG repo root —
+`leddriverfpga_FPGATarget_LEDDriverFPGA_gPdx1Ep2TLE.lvbitx`. **You must pass it
+explicitly** with `--led-bitfile`: without it, `led_driver` would run its own
+mock backend (no real light), so the launcher refuses to start a real-analyzer
+run unless you give either `--led-bitfile` or `--led-mock`. The toolbar's
+"LED:" label confirms the active mode (`FPGA RIO0` vs `mock`).
+
 ## 6. Launch
 
 ```bash
