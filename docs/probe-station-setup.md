@@ -130,23 +130,26 @@ run unless you give either `--led-bitfile` or `--led-mock`. The toolbar's
 
 ## 6. Launch
 
+Instruments are selected **inside the GUI** ("Instruments" panel at the top):
+pick the analyzer (Mock, or a VISA resource via **Refresh**/typing) and click
+**Connect** — the instrument's `*IDN?` is shown before anything can run. Pick
+the light source (PXI FPGA + bitfile via **Browse…**, or Mock light).
+
+CLI flags just pre-fill those fields:
+
 ```bash
-# Everything mock (no instruments):
-paramctl-photoiv --mock
-
-# Real 4155 + mock light (wiring up the analyzer first):
-paramctl-photoiv --resource GPIB0::17::INSTR --led-mock
-
-# Real 4155 + real LED:
+paramctl-photoiv                    # blank GUI; choose everything inside
+paramctl-photoiv --mock             # pre-select + auto-connect mock analyzer & light
 paramctl-photoiv --resource GPIB0::17::INSTR --led-bitfile /path/to/led.lvbitx
-
-# ...and apply the power calibration's equalization (optional, see §7):
-paramctl-photoiv --resource GPIB0::17::INSTR --led-bitfile /path/to/led.lvbitx --led-use-cal
 ```
 
-In the GUI: pick wavelengths → set intensities / settle / delays → choose
+Then: pick wavelengths → set intensities / settle / delays → choose
 dual-polarity if wanted → **Generate sequence** → set the **Output folder** →
 **Run campaign**. One CSV is written per curve.
+
+Selecting the PXI light source **requires the bitfile** — without it the run
+is refused (led_driver would otherwise silently run its own mock backend and
+an "illuminated" campaign would measure in the dark).
 
 ## 7. Optical power calibration (optional)
 

@@ -1,11 +1,14 @@
 """Launcher for the photo-IV campaign GUI (``paramctl-photoiv``).
 
-Builds an analyzer driver and an LED light source from the CLI flags (mock by
-default-friendly, real hardware when asked), a default IV sweep, and shows the
-campaign window. The analyzer connection is owned here for the window's
-lifetime; the light source is connected/disconnected per campaign by the
-engine, so nothing here needs ``led_driver`` installed unless real LED
-hardware is selected.
+Instrument selection happens **inside the GUI** — the "Instruments" panel
+picks the analyzer (mock or a VISA resource, with discovery + an explicit
+Connect/IDN step) and the light source (PXI FPGA bitfile or mock). All CLI
+flags here are just pre-fills for that panel, the same convention as
+``mfia-cf``::
+
+    paramctl-photoiv                          # blank GUI; pick instruments inside
+    paramctl-photoiv --mock                   # pre-select + auto-connect mocks
+    paramctl-photoiv --resource GPIB0::17::INSTR --led-bitfile /path/led.lvbitx
 """
 from __future__ import annotations
 
@@ -15,16 +18,6 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
-from ..driver import (
-    AnalyzerDriver,
-    CommunicationError,
-    FlexDriver,
-    MockDriver,
-    list_resources,
-)
-from ..light.base import LightSource
-from ..light.mock import MockLightSource
-from ..light.pxi import PxiLightSource
 from ..models import (
     ChannelConfig,
     ChannelFunction,
@@ -64,74 +57,30 @@ def _default_setup() -> Setup:
     )
 
 
-def _build_driver(args: argparse.Namespace) -> AnalyzerDriver | None:
-    if args.mock:
-        return MockDriver(inter_sample_delay_s=0.02)
-    resource = args.resource
-    if resource is None:
-        resources = list_resources()
-        if not resources:
-            print(
-                "No VISA resources discovered. Pass --mock for the synthetic "
-                "driver or --resource '<visa-string>' for a specific instrument.",
-                file=sys.stderr,
-            )
-            return None
-        if len(resources) == 1:
-            resource = resources[0]
-            print(f"Auto-selected the only VISA resource: {resource}")
-        else:
-            print("Multiple VISA resources discovered; pick one with --resource:")
-            for r in resources:
-                print(f"  {r}")
-            return None
-    return FlexDriver(resource)
-
-
-def _build_light(args: argparse.Namespace) -> LightSource | None:
-    if args.mock or args.led_mock:
-        return MockLightSource()
-    if args.led_bitfile is None:
-        # led_driver silently runs its own mock backend when no bitfile is
-        # given — on a real analyzer that means a full "illuminated" campaign
-        # measured entirely in the dark. Refuse instead of failing silently.
-        print(
-            "No light source specified: pass --led-bitfile /path/to/led.lvbitx "
-            "for the real PXI LED source, or --led-mock to run without light.\n"
-            "(The bitfile lives in the PXI-AWG repo, e.g. "
-            "leddriverfpga_FPGATarget_LEDDriverFPGA_*.lvbitx.)",
-            file=sys.stderr,
-        )
-        return None
-    return PxiLightSource(
-        bitfile=args.led_bitfile,
-        resource=args.led_resource,
-        use_cal=args.led_use_cal,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mock", action="store_true",
-        help="Use the synthetic analyzer AND the mock light source.",
+        help="Pre-select and auto-connect the mock analyzer + mock light.",
     )
     parser.add_argument(
         "--resource", default=None,
-        help="VISA resource string for the analyzer (e.g. 'GPIB0::17::INSTR').",
+        help="Pre-fill the analyzer VISA resource (e.g. 'GPIB0::17::INSTR').",
     )
     parser.add_argument(
         "--led-mock", action="store_true",
-        help="Use the mock light source with a real analyzer.",
+        help="Pre-select the mock light source.",
     )
     parser.add_argument(
         "--led-bitfile", default=None,
-        help="PXI-7853R .lvbitx bitfile. Omit to use the led_driver mock backend.",
+        help="Pre-fill the PXI-7853R .lvbitx bitfile path.",
     )
-    parser.add_argument("--led-resource", default="RIO0", help="NI-RIO resource name.")
+    parser.add_argument(
+        "--led-resource", default="RIO0", help="Pre-fill the NI-RIO resource name."
+    )
     parser.add_argument(
         "--led-use-cal", action="store_true",
-        help="Apply the led_driver power calibration (equal %% = equal power).",
+        help="Pre-check 'apply power calibration' (equal %% = equal power).",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="DEBUG logging.")
     args = parser.parse_args(argv)
@@ -143,30 +92,18 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv if argv is None else [sys.argv[0], *argv])
 
-    driver = _build_driver(args)
-    if driver is None:
-        return 1
-    light = _build_light(args)
-    if light is None:
-        return 1
-
-    try:
-        driver.connect()
-    except CommunicationError as exc:
-        print(f"Failed to connect to analyzer: {exc}", file=sys.stderr)
-        return 2
-
-    window = PhotoIvWindow(driver, light, _default_setup())
-    window.resize(1280, 760)
+    window = PhotoIvWindow(
+        _default_setup(),
+        preselect_mock=args.mock,
+        resource=args.resource,
+        led_mock=args.led_mock,
+        led_bitfile=args.led_bitfile,
+        led_resource=args.led_resource,
+        led_use_cal=args.led_use_cal,
+    )
+    window.resize(1280, 820)
     window.show()
-
-    try:
-        return app.exec()
-    finally:
-        try:
-            driver.disconnect()
-        except Exception:
-            logger.exception("photoiv_app: driver.disconnect() raised at shutdown")
+    return app.exec()
 
 
 __all__ = ["main"]

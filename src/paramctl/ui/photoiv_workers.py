@@ -139,4 +139,39 @@ class CampaignWorker(QObject):
         return str(path)
 
 
-__all__ = ["CampaignWorker"]
+class ConnectWorker(QObject):
+    """Connects an analyzer driver off the GUI thread and reports its IDN.
+
+    The driver is constructed on the main thread (construction opens no
+    transport); only ``connect()`` + ``idn()`` — the actual VISA calls — run
+    here, keeping the "no VISA on the Qt main thread" rule intact for the
+    in-GUI Connect button.
+
+    Signals:
+        done(str): the instrument's IDN string after a successful connect.
+        failed(object): the exception, if connect/idn raised.
+        finished(): emitted unconditionally last.
+    """
+
+    done = pyqtSignal(str)
+    failed = pyqtSignal(object)
+    finished = pyqtSignal()
+
+    def __init__(self, driver: AnalyzerDriver, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._driver = driver
+
+    def run(self) -> None:
+        try:
+            self._driver.connect()
+            idn = self._driver.idn()
+        except Exception as exc:
+            logger.exception("ConnectWorker: connect failed")
+            self.failed.emit(exc)
+        else:
+            self.done.emit(idn)
+        finally:
+            self.finished.emit()
+
+
+__all__ = ["CampaignWorker", "ConnectWorker"]

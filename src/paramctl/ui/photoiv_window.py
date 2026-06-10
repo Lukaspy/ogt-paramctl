@@ -41,15 +41,17 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..driver import FlexDriver, MockDriver, list_resources
 from ..driver.base import AnalyzerDriver
 from ..light.base import LightSource
-from ..light.mock import DEFAULT_WAVELENGTHS_NM
+from ..light.mock import DEFAULT_WAVELENGTHS_NM, MockLightSource
+from ..light.pxi import PxiLightSource
 from ..models.campaign import PhotoIvCampaign
 from ..models.illumination import IlluminationSequence
 from ..models.measurement import SweepRange
 from ..models.results import Sample
 from ..models.setup import Setup
-from .photoiv_workers import CampaignWorker
+from .photoiv_workers import CampaignWorker, ConnectWorker
 from .widgets import PlotView, SetupEditor
 
 logger = logging.getLogger(__name__)
@@ -67,21 +69,40 @@ def _spin(value: float, lo: float, hi: float, step: float, decimals: int = 3) ->
     return s
 
 
+_MOCK_ANALYZER = "Mock analyzer"
+_LIGHT_PXI = "PXI FPGA LED source"
+_LIGHT_MOCK = "Mock light"
+
+
 class PhotoIvWindow(QMainWindow):
-    """Stage and run a photo-IV campaign against a driver + light source."""
+    """Stage and run a photo-IV campaign; instruments are selected in-GUI.
+
+    The analyzer and the light source are chosen inside the window (CLI flags
+    only pre-fill the fields, mirroring ``mfia-cf``). The analyzer connects
+    via an explicit Connect button — its ``*IDN?`` is shown before any run —
+    on a worker thread, since VISA must never run on the Qt main thread. The
+    light source is constructed fresh at Run time; its connect/disconnect
+    lifecycle is owned per-campaign by the engine.
+    """
 
     def __init__(
         self,
-        driver: AnalyzerDriver,
-        light: LightSource,
         initial_setup: Setup,
+        *,
+        preselect_mock: bool = False,
+        resource: str | None = None,
+        led_mock: bool = False,
+        led_bitfile: str | None = None,
+        led_resource: str = "RIO0",
+        led_use_cal: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._driver = driver
-        self._light = light
+        self._driver: AnalyzerDriver | None = None
         self._thread: QThread | None = None
         self._worker: CampaignWorker | None = None
+        self._conn_thread: QThread | None = None
+        self._conn_worker: ConnectWorker | None = None
         self._abort_event: threading.Event | None = None
         self._sequence: IlluminationSequence | None = None
         self._campaign: PhotoIvCampaign | None = None
@@ -91,6 +112,41 @@ class PhotoIvWindow(QMainWindow):
         self._build_ui()
         self._editor.populate_from(initial_setup)
         self._wire()
+        self._apply_prefills(
+            preselect_mock=preselect_mock,
+            resource=resource,
+            led_mock=led_mock,
+            led_bitfile=led_bitfile,
+            led_resource=led_resource,
+            led_use_cal=led_use_cal,
+        )
+
+    def _apply_prefills(
+        self,
+        *,
+        preselect_mock: bool,
+        resource: str | None,
+        led_mock: bool,
+        led_bitfile: str | None,
+        led_resource: str,
+        led_use_cal: bool,
+    ) -> None:
+        if resource:
+            self._resource_combo.addItem(resource)
+            self._resource_combo.setCurrentText(resource)
+        if preselect_mock:
+            self._resource_combo.setCurrentText(_MOCK_ANALYZER)
+        if led_mock or preselect_mock:
+            self._light_combo.setCurrentText(_LIGHT_MOCK)
+        if led_bitfile:
+            self._bitfile_edit.setText(led_bitfile)
+        self._led_resource_edit.setText(led_resource)
+        self._use_cal_check.setChecked(led_use_cal)
+        # Mock connects are instant and side-effect free, so a --mock launch
+        # is one step. A real resource still requires the explicit Connect
+        # click (and its IDN confirmation) before anything can run.
+        if preselect_mock:
+            self._on_connect()
 
     # --- UI assembly --------------------------------------------------------
 
@@ -100,16 +156,7 @@ class PhotoIvWindow(QMainWindow):
         self._stop_btn.setEnabled(False)
         self._clear_btn = QPushButton("Clear plot")
         self._log_y_check = QCheckBox("Log Y")
-        # idn() works pre-connect on both sources and names the actual mode
-        # (e.g. "PXI-7853R ... (mock)" vs "(FPGA RIO0)") — the class name alone
-        # would hide a silently-mocked light source.
-        try:
-            light_idn = self._light.idn()
-        except Exception:
-            light_idn = type(self._light).__name__
-        self._idn_label = QLabel(
-            f"Analyzer: {type(self._driver).__name__}   LED: {light_idn}"
-        )
+        self._idn_label = QLabel("Analyzer: not connected")
 
         toolbar = QHBoxLayout()
         toolbar.addWidget(self._run_btn)
@@ -121,6 +168,7 @@ class PhotoIvWindow(QMainWindow):
 
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
+        controls_layout.addWidget(self._build_instruments_group())
         controls_layout.addWidget(self._build_metadata_group())
         controls_layout.addWidget(self._build_sequence_group())
         controls_layout.addWidget(self._build_ranges_group())
@@ -158,6 +206,150 @@ class PhotoIvWindow(QMainWindow):
         self.setStatusBar(self._status_bar)
         self._cursor_label = QLabel("")
         self._status_bar.addPermanentWidget(self._cursor_label)
+
+    def _build_instruments_group(self) -> QGroupBox:
+        box = QGroupBox("Instruments")
+        form = QFormLayout(box)
+
+        # Analyzer: editable so a resource string can be typed directly;
+        # Refresh queries VISA discovery on demand (not at startup — it can
+        # be slow with no backend installed).
+        self._resource_combo = QComboBox()
+        self._resource_combo.setEditable(True)
+        self._resource_combo.addItem(_MOCK_ANALYZER)
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self._on_refresh_resources)
+        self._connect_btn = QPushButton("Connect")
+        self._connect_btn.clicked.connect(self._on_connect)
+        analyzer_row = QHBoxLayout()
+        analyzer_row.addWidget(self._resource_combo, stretch=1)
+        analyzer_row.addWidget(refresh_btn)
+        analyzer_row.addWidget(self._connect_btn)
+        analyzer_holder = QWidget()
+        analyzer_holder.setLayout(analyzer_row)
+        form.addRow("Analyzer", analyzer_holder)
+
+        self._analyzer_status = QLabel("not connected")
+        form.addRow("", self._analyzer_status)
+
+        # Light source: PXI FPGA (needs the .lvbitx) or mock. Constructed at
+        # Run time; the campaign engine owns its connect/disconnect.
+        self._light_combo = QComboBox()
+        self._light_combo.addItem(_LIGHT_PXI)
+        self._light_combo.addItem(_LIGHT_MOCK)
+        form.addRow("Light source", self._light_combo)
+
+        self._bitfile_edit = QLineEdit()
+        self._bitfile_edit.setPlaceholderText("required for PXI — *.lvbitx")
+        bitfile_browse = QPushButton("Browse…")
+        bitfile_browse.clicked.connect(self._on_browse_bitfile)
+        bitfile_row = QHBoxLayout()
+        bitfile_row.addWidget(self._bitfile_edit, stretch=1)
+        bitfile_row.addWidget(bitfile_browse)
+        bitfile_holder = QWidget()
+        bitfile_holder.setLayout(bitfile_row)
+        form.addRow(".lvbitx bitfile", bitfile_holder)
+
+        self._led_resource_edit = QLineEdit("RIO0")
+        form.addRow("NI-RIO resource", self._led_resource_edit)
+        self._use_cal_check = QCheckBox("Apply power calibration (equalize % across λ)")
+        form.addRow("", self._use_cal_check)
+
+        def _light_fields(_index: int = 0) -> None:
+            is_pxi = self._light_combo.currentText() == _LIGHT_PXI
+            self._bitfile_edit.setEnabled(is_pxi)
+            bitfile_browse.setEnabled(is_pxi)
+            self._led_resource_edit.setEnabled(is_pxi)
+            self._use_cal_check.setEnabled(is_pxi)
+
+        self._light_combo.currentIndexChanged.connect(_light_fields)
+        _light_fields()
+        return box
+
+    def _on_refresh_resources(self) -> None:
+        current = self._resource_combo.currentText()
+        try:
+            resources = list_resources()
+        except Exception as exc:
+            self._status_bar.showMessage(f"VISA discovery failed: {exc}", 8000)
+            return
+        self._resource_combo.clear()
+        self._resource_combo.addItem(_MOCK_ANALYZER)
+        for r in resources:
+            self._resource_combo.addItem(r)
+        if current:
+            self._resource_combo.setCurrentText(current)
+        self._status_bar.showMessage(
+            f"Found {len(resources)} VISA resource(s).", 5000
+        )
+
+    def _on_browse_bitfile(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "FPGA bitfile", self._bitfile_edit.text(), "LabVIEW FPGA (*.lvbitx)"
+        )
+        if path:
+            self._bitfile_edit.setText(path)
+
+    # --- analyzer connect ----------------------------------------------------
+
+    def _on_connect(self) -> None:
+        if self._thread is not None:
+            self._status_bar.showMessage("Cannot reconnect during a campaign.", 5000)
+            return
+        if self._conn_thread is not None:
+            return  # a connect attempt is already in flight
+
+        choice = self._resource_combo.currentText().strip()
+        if not choice:
+            self._status_bar.showMessage("Pick or type a VISA resource first.", 6000)
+            return
+
+        if self._driver is not None:
+            try:
+                self._driver.disconnect()
+            except Exception:
+                logger.exception("PhotoIvWindow: disconnect of old driver raised")
+            self._driver = None
+
+        driver: AnalyzerDriver
+        if choice == _MOCK_ANALYZER:
+            driver = MockDriver(inter_sample_delay_s=0.02)
+        else:
+            driver = FlexDriver(choice)
+
+        self._analyzer_status.setText(f"connecting to {choice}…")
+        self._connect_btn.setEnabled(False)
+
+        worker = ConnectWorker(driver)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(lambda idn, d=driver: self._on_connect_done(d, idn))
+        worker.failed.connect(self._on_connect_failed)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(self._cleanup_conn_thread)
+        self._conn_worker = worker
+        self._conn_thread = thread
+        thread.start()
+
+    def _on_connect_done(self, driver: AnalyzerDriver, idn: str) -> None:
+        self._driver = driver
+        self._analyzer_status.setText(idn)
+        self._idn_label.setText(f"Analyzer: {idn}")
+        self._status_bar.showMessage("Analyzer connected.", 5000)
+
+    def _on_connect_failed(self, exc: BaseException) -> None:
+        self._analyzer_status.setText("not connected")
+        self._status_bar.showMessage(f"Connect failed: {exc}", 12000)
+
+    def _cleanup_conn_thread(self) -> None:
+        if self._conn_worker is not None:
+            self._conn_worker.deleteLater()
+        if self._conn_thread is not None:
+            self._conn_thread.deleteLater()
+        self._conn_worker = None
+        self._conn_thread = None
+        self._connect_btn.setEnabled(True)
 
     def _build_metadata_group(self) -> QGroupBox:
         box = QGroupBox("Run")
@@ -409,8 +601,32 @@ class PhotoIvWindow(QMainWindow):
             self._status_bar.showMessage(f"Campaign invalid: {first.get('msg', exc)}", 10000)
             return None
 
+    def _build_light_source(self) -> LightSource | None:
+        if self._light_combo.currentText() == _LIGHT_MOCK:
+            return MockLightSource()
+        bitfile = self._bitfile_edit.text().strip()
+        if not bitfile:
+            # led_driver silently runs its own mock backend without a bitfile —
+            # an "illuminated" campaign would measure entirely in the dark.
+            self._status_bar.showMessage(
+                "PXI light source needs the .lvbitx bitfile (or switch to Mock light).",
+                10000,
+            )
+            return None
+        return PxiLightSource(
+            bitfile=bitfile,
+            resource=self._led_resource_edit.text().strip() or "RIO0",
+            use_cal=self._use_cal_check.isChecked(),
+        )
+
     def _on_run(self) -> None:
         if self._thread is not None:
+            return
+        if self._driver is None or not self._driver.is_connected:
+            self._status_bar.showMessage("Connect the analyzer first.", 8000)
+            return
+        light = self._build_light_source()
+        if light is None:
             return
         campaign = self._build_campaign()
         if campaign is None:
@@ -420,7 +636,7 @@ class PhotoIvWindow(QMainWindow):
         self._plot.clear_history()
         self._last_curve_key = None
         self._abort_event = threading.Event()
-        worker = CampaignWorker(self._driver, self._light, campaign, self._abort_event)
+        worker = CampaignWorker(self._driver, light, campaign, self._abort_event)
         thread = QThread(self)
         worker.moveToThread(thread)
 
@@ -438,6 +654,7 @@ class PhotoIvWindow(QMainWindow):
         self._thread = thread
         self._run_btn.setEnabled(False)
         self._generate_btn.setEnabled(False)
+        self._connect_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         if not campaign.output_dir:
             self._status_bar.showMessage(
@@ -450,10 +667,11 @@ class PhotoIvWindow(QMainWindow):
             return
         self._status_bar.showMessage("Aborting…")
         self._abort_event.set()
-        try:
-            self._driver.abort()
-        except Exception:
-            logger.exception("PhotoIvWindow: driver.abort() raised")
+        if self._driver is not None:
+            try:
+                self._driver.abort()
+            except Exception:
+                logger.exception("PhotoIvWindow: driver.abort() raised")
 
     def _on_clear(self) -> None:
         if self._thread is not None:
@@ -507,18 +725,29 @@ class PhotoIvWindow(QMainWindow):
         self._abort_event = None
         self._run_btn.setEnabled(True)
         self._generate_btn.setEnabled(True)
+        self._connect_btn.setEnabled(self._conn_thread is None)
         self._stop_btn.setEnabled(False)
 
     def closeEvent(self, a0: QCloseEvent | None) -> None:
         if self._abort_event is not None:
             self._abort_event.set()
         if self._thread is not None:
-            try:
-                self._driver.abort()
-            except Exception:
-                logger.exception("PhotoIvWindow: driver.abort() during close raised")
+            if self._driver is not None:
+                try:
+                    self._driver.abort()
+                except Exception:
+                    logger.exception("PhotoIvWindow: driver.abort() during close raised")
             self._thread.quit()
             self._thread.wait(2000)
+        if self._conn_thread is not None:
+            self._conn_thread.quit()
+            self._conn_thread.wait(2000)
+        # The window owns the analyzer connection now that selection is in-GUI.
+        if self._driver is not None:
+            try:
+                self._driver.disconnect()
+            except Exception:
+                logger.exception("PhotoIvWindow: driver.disconnect() during close raised")
         super().closeEvent(a0)
 
 

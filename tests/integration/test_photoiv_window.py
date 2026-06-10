@@ -1,12 +1,8 @@
-"""Integration test for the photo-IV campaign window (mock driver + LED)."""
+"""Integration tests for the photo-IV campaign window (in-GUI instruments)."""
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from paramctl.driver import MockDriver
-from paramctl.light import MockLightSource
 from paramctl.models import (
     ChannelConfig,
     ChannelFunction,
@@ -35,12 +31,14 @@ def _setup(points: int = 5) -> Setup:
     )
 
 
-@pytest.fixture
-def driver():
-    drv = MockDriver(inter_sample_delay_s=0.0)
-    drv.connect()
-    yield drv
-    drv.disconnect()
+def _mock_window(qtbot, points: int = 5) -> PhotoIvWindow:
+    """Window with the mock analyzer pre-selected, connected, and mock light."""
+    win = PhotoIvWindow(_setup(points=points), preselect_mock=True)
+    qtbot.addWidget(win)
+    qtbot.waitUntil(
+        lambda: win._driver is not None and win._driver.is_connected, timeout=5000
+    )
+    return win
 
 
 def _zero_timing(win: PhotoIvWindow) -> None:
@@ -52,9 +50,14 @@ def _zero_timing(win: PhotoIvWindow) -> None:
     win._inter_wl_delay.setValue(0.0)
 
 
-def test_single_curve_matrix_writes_one_csv_per_step(qtbot, driver, tmp_path: Path) -> None:
-    win = PhotoIvWindow(driver, MockLightSource(), _setup(points=5))
-    qtbot.addWidget(win)
+def test_preselect_mock_connects_and_selects_mock_light(qtbot) -> None:
+    win = _mock_window(qtbot)
+    assert "MOCK" in win._analyzer_status.text()
+    assert win._light_combo.currentText() == "Mock light"
+
+
+def test_single_curve_matrix_writes_one_csv_per_step(qtbot, tmp_path: Path) -> None:
+    win = _mock_window(qtbot)
 
     win._mode_combo.setCurrentIndex(win._mode_combo.findData("matrix"))
     win._dual_check.setChecked(False)
@@ -79,11 +82,9 @@ def test_single_curve_matrix_writes_one_csv_per_step(qtbot, driver, tmp_path: Pa
     assert markers == ["✓", "✓", "✓"]
 
 
-def test_series_dual_polarity_writes_two_curves_per_step(qtbot, driver, tmp_path: Path) -> None:
-    win = PhotoIvWindow(driver, MockLightSource(), _setup(points=5))
-    qtbot.addWidget(win)
+def test_series_dual_polarity_writes_two_curves_per_step(qtbot, tmp_path: Path) -> None:
+    win = _mock_window(qtbot)
 
-    # Series mode + dual polarity are the defaults; be explicit anyway.
     win._mode_combo.setCurrentIndex(win._mode_combo.findData("series"))
     win._dual_check.setChecked(True)
     win._dual_v.setValue(7.0)
@@ -114,9 +115,8 @@ def test_series_dual_polarity_writes_two_curves_per_step(qtbot, driver, tmp_path
     assert markers == ["✓", "✓", "✓", "✓"]
 
 
-def test_reverse_order_generates_ir_first(qtbot, driver) -> None:
-    win = PhotoIvWindow(driver, MockLightSource(), _setup())
-    qtbot.addWidget(win)
+def test_reverse_order_generates_ir_first(qtbot) -> None:
+    win = _mock_window(qtbot)
 
     win._wl_checks[385.0].setChecked(True)
     win._wl_checks[850.0].setChecked(True)
@@ -136,8 +136,28 @@ def test_reverse_order_generates_ir_first(qtbot, driver) -> None:
     assert lit == [385.0, 850.0]
 
 
-def test_run_without_sequence_is_rejected(qtbot, driver, tmp_path: Path) -> None:
-    win = PhotoIvWindow(driver, MockLightSource(), _setup())
+def test_run_without_connect_is_rejected(qtbot) -> None:
+    win = PhotoIvWindow(_setup())  # no preselect — nothing connected
     qtbot.addWidget(win)
+    win._wl_checks[385.0].setChecked(True)
+    win._on_generate_sequence()
+    win._on_run()
+    assert win._thread is None  # refused before starting anything
+
+
+def test_run_with_pxi_light_but_no_bitfile_is_rejected(qtbot) -> None:
+    win = _mock_window(qtbot)
+    win._light_combo.setCurrentText("PXI FPGA LED source")
+    win._bitfile_edit.setText("")
+    win._wl_checks[385.0].setChecked(True)
+    _zero_timing(win)
+    win._on_generate_sequence()
+    win._on_run()
+    # led_driver would silently run its own mock backend -> must refuse.
+    assert win._thread is None
+
+
+def test_run_without_sequence_is_rejected(qtbot) -> None:
+    win = _mock_window(qtbot)
     win._on_run()  # no sequence generated yet
-    assert win._thread is None  # nothing started
+    assert win._thread is None

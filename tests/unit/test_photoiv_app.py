@@ -1,43 +1,59 @@
-"""Unit tests for the photo-IV launcher's driver/light selection logic."""
+"""Unit tests for the photo-IV window's instrument pre-fill behaviour."""
 from __future__ import annotations
 
-import argparse
-
-from paramctl.light import MockLightSource, PxiLightSource
-from paramctl.ui.photoiv_app import _build_light
-
-
-def _ns(**overrides: object) -> argparse.Namespace:
-    base: dict[str, object] = {
-        "mock": False,
-        "resource": None,
-        "led_mock": False,
-        "led_bitfile": None,
-        "led_resource": "RIO0",
-        "led_use_cal": False,
-        "verbose": False,
-    }
-    base.update(overrides)
-    return argparse.Namespace(**base)
+from paramctl.models import (
+    ChannelConfig,
+    ChannelFunction,
+    ChannelId,
+    ChannelMode,
+    Setup,
+    SweepMeasurement,
+    SweepRange,
+)
+from paramctl.ui.photoiv_window import PhotoIvWindow
 
 
-def test_mock_flag_selects_mock_light() -> None:
-    assert isinstance(_build_light(_ns(mock=True)), MockLightSource)
+def _setup() -> Setup:
+    return Setup(
+        channels=[
+            ChannelConfig(
+                channel_id=ChannelId.SMU1,
+                mode=ChannelMode.V_SOURCE,
+                function=ChannelFunction.VAR1,
+                compliance=10e-3,
+            ),
+        ],
+        measurement=SweepMeasurement(var1=SweepRange(start=-1.0, stop=1.0, points=5)),
+    )
 
 
-def test_led_mock_flag_selects_mock_light() -> None:
-    assert isinstance(_build_light(_ns(led_mock=True)), MockLightSource)
+def test_blank_launch_defaults_to_pxi_light_and_no_connection(qtbot) -> None:
+    win = PhotoIvWindow(_setup())
+    qtbot.addWidget(win)
+    assert win._driver is None
+    assert win._light_combo.currentText() == "PXI FPGA LED source"
+    assert win._analyzer_status.text() == "not connected"
 
 
-def test_real_run_without_bitfile_is_refused(capsys) -> None:
-    # led_driver would silently fall back to its own mock backend — the
-    # launcher must refuse instead so an "illuminated" campaign can't run dark.
-    assert _build_light(_ns()) is None
-    err = capsys.readouterr().err
-    assert "--led-bitfile" in err and "--led-mock" in err
+def test_resource_and_bitfile_prefills_land_in_fields(qtbot) -> None:
+    win = PhotoIvWindow(
+        _setup(),
+        resource="GPIB0::17::INSTR",
+        led_bitfile="/path/to/led.lvbitx",
+        led_resource="RIO1",
+        led_use_cal=True,
+    )
+    qtbot.addWidget(win)
+    assert win._resource_combo.currentText() == "GPIB0::17::INSTR"
+    assert win._bitfile_edit.text() == "/path/to/led.lvbitx"
+    assert win._led_resource_edit.text() == "RIO1"
+    assert win._use_cal_check.isChecked()
+    # Pre-filling a real resource must NOT auto-connect (explicit IDN step).
+    assert win._driver is None
 
 
-def test_bitfile_selects_real_pxi_source() -> None:
-    light = _build_light(_ns(led_bitfile="/path/to/led.lvbitx"))
-    assert isinstance(light, PxiLightSource)
-    assert light.bitfile == "/path/to/led.lvbitx"
+def test_led_mock_prefill_selects_mock_light(qtbot) -> None:
+    win = PhotoIvWindow(_setup(), led_mock=True)
+    qtbot.addWidget(win)
+    assert win._light_combo.currentText() == "Mock light"
+    assert win._driver is None  # analyzer untouched
