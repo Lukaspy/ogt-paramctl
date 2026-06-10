@@ -48,7 +48,7 @@ from ..light.mock import DEFAULT_WAVELENGTHS_NM, MockLightSource
 from ..light.pxi import PxiLightSource
 from ..models.campaign import PhotoIvCampaign
 from ..models.illumination import IlluminationSequence
-from ..models.measurement import SweepRange
+from ..models.measurement import SweepMeasurement, SweepRange
 from ..models.results import Sample
 from ..models.setup import Setup
 from .photoiv_workers import CampaignWorker, ConnectWorker, DiscoveryWorker
@@ -615,9 +615,14 @@ class PhotoIvWindow(QMainWindow):
         if self._dual_check.isChecked():
             v = self._dual_v.value()
             n = self._dual_points.value()
+            # The dual-polarity ranges override only the span; the sweep
+            # direction (single vs double, i.e. with retrace) still follows
+            # the base editor's Sweep panel.
+            assert isinstance(base.measurement, SweepMeasurement)
+            direction = base.measurement.var1.direction
             sweep_ranges = [
-                SweepRange(start=0.0, stop=v, points=n),
-                SweepRange(start=0.0, stop=-v, points=n),
+                SweepRange(start=0.0, stop=v, points=n, direction=direction),
+                SweepRange(start=0.0, stop=-v, points=n, direction=direction),
             ]
         try:
             return PhotoIvCampaign(

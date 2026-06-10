@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Photo-IV window: dual-polarity sweep ranges ignored the Direction setting in the base editor's Sweep panel, always running single sweeps. The ±V ranges now inherit the configured direction, so double sweeps (with retrace, for hysteresis) work in campaigns. Direction was already honored when dual polarity is off.
 - Photo-IV window: VISA resource discovery (the Refresh button) ran on the Qt main thread, freezing the GUI for ~8 s while pyvisa-py probed every `/dev/gpib*` minor and scanned TCPIP — easily mistaken for discovery not working. It now runs on a worker thread (`DiscoveryWorker`), with a "Discovering VISA resources…" status message and the Refresh button disabled while in flight.
 - Photo-IV window: the resource dropdown started with only "Mock analyzer" until Refresh was clicked. `paramctl-photoiv` now triggers one background discovery at startup (skipped for `--mock` launches, which stay fully offline).
 

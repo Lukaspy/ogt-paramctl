@@ -9,6 +9,7 @@ from paramctl.models import (
     ChannelId,
     ChannelMode,
     Setup,
+    SweepDirection,
     SweepMeasurement,
     SweepRange,
 )
@@ -161,6 +162,45 @@ def test_run_without_sequence_is_rejected(qtbot) -> None:
     win = _mock_window(qtbot)
     win._on_run()  # no sequence generated yet
     assert win._thread is None
+
+
+def test_dual_polarity_inherits_double_sweep_direction(qtbot, tmp_path: Path) -> None:
+    win = _mock_window(qtbot)
+
+    # Direction lives in the base editor's Sweep panel; dual-polarity ranges
+    # must inherit it instead of resetting to SINGLE.
+    sweep_panel = win._editor._sweep
+    sweep_panel._direction.setCurrentIndex(
+        sweep_panel._direction.findData(SweepDirection.DOUBLE)
+    )
+    win._mode_combo.setCurrentIndex(win._mode_combo.findData("matrix"))
+    win._interleave_check.setChecked(False)
+    win._dual_check.setChecked(True)
+    win._dual_points.setValue(5)
+    win._outdir_edit.setText(str(tmp_path))
+    win._wl_checks[385.0].setChecked(True)
+    win._intensity_edit.setText("100")
+    _zero_timing(win)
+    win._on_generate_sequence()
+
+    campaign = win._build_campaign()
+    assert campaign is not None and campaign.sweep_ranges is not None
+    assert all(r.direction is SweepDirection.DOUBLE for r in campaign.sweep_ranges)
+
+    win._on_run()
+    qtbot.waitUntil(lambda: win._thread is None, timeout=10_000)
+
+    # 2 polarities per step; every curve has 2*points-1 rows (retrace).
+    assert win._sequence is not None
+    written = sorted(tmp_path.glob("*.csv"))
+    assert len(written) == 2 * len(win._sequence)
+    for path in written:
+        rows = [
+            line
+            for line in path.read_text().splitlines()
+            if line and not line.startswith("#")
+        ]
+        assert len(rows) - 1 == 9  # column header + (2 * 5 - 1) samples
 
 
 def _combo_items(win: PhotoIvWindow) -> list[str]:
